@@ -1,0 +1,27 @@
+[package]
+name = "hf-downloader-egui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = { version = "0.29", default-features = false, features = ["glow", "default_fonts"] }
+egui = "0.29"
+# native-tls uses Windows Schannel (system, zero external DLL) instead of bundling
+# rustls + ring, which shaves a large chunk off the binary on Windows.
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "http2", "native-tls"] }
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+url = "2"
+regex = "1"
+rfd = "0.15"
+sys-locale = "0.3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
