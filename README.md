@@ -2,6 +2,11 @@
 
 > 🇬🇧 English documentation: [README.en.md](README.en.md)
 
+[![Latest Release](https://img.shields.io/github/v/release/lordquest/hf-downloader-egui?label=release)](https://github.com/lordquest/hf-downloader-egui/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/lordquest/hf-downloader-egui/total)](https://github.com/lordquest/hf-downloader-egui/releases)
+
+**下载 / Download：** [hf-downloader-egui.exe（Windows，约 4.8 MB）](https://github.com/lordquest/hf-downloader-egui/releases/latest/download/hf-downloader-egui.exe)
+
 一个用于下载 [Hugging Face](https://huggingface.co) 模型 / 数据集仓库的**原生桌面工具**，无需安装 Git、Git LFS 或任何运行时依赖。
 
 A native desktop tool for downloading Hugging Face model/dataset repos — no Git, no Git LFS, no runtime dependencies required.

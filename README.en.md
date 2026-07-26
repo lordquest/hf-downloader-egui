@@ -1,5 +1,12 @@
 # HF Model Downloader (egui)
 
+> 🇨🇳 中文文档：[README.md](README.md)
+
+[![Latest Release](https://img.shields.io/github/v/release/lordquest/hf-downloader-egui?label=release)](https://github.com/lordquest/hf-downloader-egui/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/lordquest/hf-downloader-egui/total)](https://github.com/lordquest/hf-downloader-egui/releases)
+
+**Download:** [hf-downloader-egui.exe (Windows, ~4.8 MB)](https://github.com/lordquest/hf-downloader-egui/releases/latest/download/hf-downloader-egui.exe)
+
 A native desktop tool for downloading files from [Hugging Face](https://huggingface.co) model / dataset repositories — no Git, no Git LFS, and no runtime dependencies required.
 
 ---
