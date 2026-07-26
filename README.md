@@ -4,6 +4,7 @@
 
 [![Latest Release](https://img.shields.io/github/v/release/lordquest/hf-downloader-egui?label=release)](https://github.com/lordquest/hf-downloader-egui/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/lordquest/hf-downloader-egui/total)](https://github.com/lordquest/hf-downloader-egui/releases)
+[![License: MIT](https://img.shields.io/github/license/lordquest/hf-downloader-egui)](LICENSE)
 
 **下载 / Download：** [hf-downloader-egui.exe（Windows，约 4.8 MB）](https://github.com/lordquest/hf-downloader-egui/releases/latest/download/hf-downloader-egui.exe)
 
@@ -100,4 +101,6 @@ cargo build --release
 
 ## 许可证 / License
 
-本项目仅供学习与个人使用。Hugging Face 相关内容请遵守其服务条款与对应模型的许可协议。
+本项目基于 **MIT License** 开源，详见 [LICENSE](LICENSE)。
+
+Hugging Face 上的模型 / 数据集内容仍须遵守其各自的服务条款与许可协议。

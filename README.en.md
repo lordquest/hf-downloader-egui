@@ -4,6 +4,7 @@
 
 [![Latest Release](https://img.shields.io/github/v/release/lordquest/hf-downloader-egui?label=release)](https://github.com/lordquest/hf-downloader-egui/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/lordquest/hf-downloader-egui/total)](https://github.com/lordquest/hf-downloader-egui/releases)
+[![License: MIT](https://img.shields.io/github/license/lordquest/hf-downloader-egui)](LICENSE)
 
 **Download:** [hf-downloader-egui.exe (Windows, ~4.8 MB)](https://github.com/lordquest/hf-downloader-egui/releases/latest/download/hf-downloader-egui.exe)
 
@@ -98,4 +99,6 @@ Accessible any time from the top-bar right-click menu or the "About" button.
 
 ## License
 
-For learning and personal use only. HF content is subject to its Terms of Service and the license of each respective model.
+This project is open source under the **MIT License** — see [LICENSE](LICENSE).
+
+Content from Hugging Face is still subject to its Terms of Service and the license of each respective model.
