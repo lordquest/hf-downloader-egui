@@ -1,4 +1,4 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 mod config;
 mod download;
@@ -600,17 +600,11 @@ fn detect_system_lang() -> String {
     }
 }
 
-/// Load a system CJK font so Chinese text renders (egui's bundled font is Latin-only).
+/// Load a CJK font so Chinese text renders (egui's bundled font is Latin-only).
 fn setup_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
-    let candidates = [
-        "C:/Windows/Fonts/msyh.ttc",
-        "C:/Windows/Fonts/msyh.ttf",
-        "C:/Windows/Fonts/simhei.ttf",
-        "C:/Windows/Fonts/simsun.ttc",
-    ];
-    for path in candidates {
-        if let Ok(bytes) = std::fs::read(path) {
+    for path in font_candidates() {
+        if let Ok(bytes) = std::fs::read(&path) {
             fonts
                 .font_data
                 .insert("cjk".to_owned(), egui::FontData::from_owned(bytes));
@@ -624,6 +618,67 @@ fn setup_fonts(ctx: &egui::Context) {
         }
     }
     ctx.set_fonts(fonts);
+}
+
+/// Candidate CJK font paths: a font bundled next to the exe (copied by build.rs
+/// from `src/fonts`), followed by OS-specific system fonts.
+fn font_candidates() -> Vec<std::path::PathBuf> {
+    let mut v: Vec<std::path::PathBuf> = Vec::new();
+
+    // 1) Bundled font sitting next to the executable (`<exe_dir>/fonts/*`).
+    if let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+    {
+        if let Ok(entries) = std::fs::read_dir(exe_dir.join("fonts")) {
+            for e in entries.flatten() {
+                let path = e.path();
+                if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                    if matches!(ext, "ttf" | "ttc" | "otf" | "otc") {
+                        v.push(path);
+                    }
+                }
+            }
+        }
+    }
+
+    // 2) OS-specific system fonts.
+    if cfg!(target_os = "windows") {
+        v.push("C:/Windows/Fonts/msyh.ttc".into());
+        v.push("C:/Windows/Fonts/msyh.ttf".into());
+        v.push("C:/Windows/Fonts/simhei.ttf".into());
+        v.push("C:/Windows/Fonts/simsun.ttc".into());
+    } else if cfg!(target_os = "macos") {
+        v.push("/System/Library/Fonts/PingFang.ttc".into());
+        v.push("/System/Library/Fonts/STHeiti Light.ttc".into());
+        v.push("/Library/Fonts/Arial Unicode.ttf".into());
+    } else {
+        // Linux: common locations for Noto CJK / WenQuanYi, then a directory scan.
+        v.push("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc".into());
+        v.push("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc".into());
+        v.push("/usr/share/fonts/truetype/noto/NotoSansSC-Regular.otf".into());
+        v.push("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc".into());
+        v.push("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc".into());
+        v.push("/usr/share/fonts/otf/noto/NotoSansCJK-Regular.otf".into());
+        for dir in [
+            "/usr/share/fonts/truetype/noto",
+            "/usr/share/fonts/opentype/noto",
+            "/usr/share/fonts/truetype/wqy",
+            "/usr/share/fonts/otf/noto",
+        ] {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for e in entries.flatten() {
+                    let path = e.path();
+                    if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                        if matches!(ext, "ttf" | "ttc" | "otf" | "otc") {
+                            v.push(path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    v
 }
 
 fn main() -> eframe::Result<()> {

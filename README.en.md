@@ -89,11 +89,20 @@ Accessible any time from the top-bar right-click menu or the "About" button.
 ## Technical Notes
 
 - GUI: [egui](https://github.com/emilk/egui) + [eframe](https://github.com/emilk/egui) 0.29 (`egui_glow` / OpenGL backend, immediate mode).
-- Network: [reqwest](https://github.com/seanmonstar/reqwest) 0.12 using `native-tls` (system Schannel on Windows — no extra TLS library bundled).
+- Network: [reqwest](https://github.com/seanmonstar/reqwest) 0.12 using `rustls-tls` (pure-Rust TLS, no system OpenSSL / Schannel dependency), with bundled CA roots — a single self-contained executable with zero system dependencies.
 - Download threads send progress to the UI thread via `std::sync::mpsc`.
-- Chinese text relies on loading `C:\Windows\Fonts\msyh.ttc` (Microsoft YaHei) at runtime. On a non-Chinese Windows without a bundled CJK font, Chinese glyphs will be missing — you would need to bundle a font.
+- Chinese text: a CJK font is picked per platform (Windows uses the system Microsoft YaHei; Linux/macOS use system Noto / WenQuanYi / PingFang, etc.). You can also drop any `.ttf/.ttc/.otf` into the `fonts/` directory next to the exe and it will be used first.
+- Static CRT: the Windows build statically links the C runtime via `+crt-static` in `.cargo/config.toml`, so no VC++ redistributable is needed.
 
-> Note: This project is optimized for Windows (static CRT via `+crt-static`). It can compile on Linux / macOS, but some paths (default download dir, font) would need adjustments.
+## Platforms
+
+| Platform | Status | Notes |
+| --- | --- | --- |
+| Windows | ✅ recommended | single exe, double-click to run |
+| Linux | ✅ supported | needs a graphical environment (X11/Wayland + OpenGL); the CI tarball already bundles a CJK font so Chinese renders after extraction |
+| macOS | ⚠️ compiles | no official build provided; run `cargo build --release` yourself |
+
+> Note: pushing a `v*` tag to GitHub triggers CI that produces the Windows exe and a Linux tarball (see `.github/workflows/release.yml`).
 
 ---
 

@@ -91,11 +91,20 @@ cargo build --release
 ## 技术说明 / Technical Notes
 
 - GUI：[egui](https://github.com/emilk/egui) + [eframe](https://github.com/emilk/egui) 0.29（`egui_glow` / OpenGL 后端，即时模式）。
-- 网络：[reqwest](https://github.com/seanmonstar/reqwest) 0.12，使用 `native-tls`（Windows 上走系统 Schannel，不额外打包 TLS 库）。
+- 网络：[reqwest](https://github.com/seanmonstar/reqwest) 0.12，使用 `rustls-tls`（纯 Rust 的 TLS，不依赖系统的 OpenSSL / Schannel），内置 CA 根证书，做到单一可执行文件、零系统依赖。
 - 下载线程通过 `std::sync::mpsc` 把进度发送给 UI 线程。
-- 中文显示依赖运行时加载 `C:\Windows\Fonts\msyh.ttc`（微软雅黑）；在非中文 Windows 上若未内置中文字体，中文会显示为缺字，需自行打包字体。
+- 中文显示：按平台探测 CJK 字体（Windows 用系统微软雅黑；Linux/macOS 用系统 Noto / WenQuanYi / PingFang 等）；也可把任意 `.ttf/.ttc/.otf` 放进 exe 同级的 `fonts/` 目录，程序会优先使用。
+- 静态 CRT：Windows 构建通过 `.cargo/config.toml` 的 `+crt-static` 静态链接 C 运行时，无需安装 VC++ 运行库。
 
-> 注：本项目面向 Windows 优化（静态 CRT、`+crt-static`）。在 Linux / macOS 上可编译，但部分路径（如下载目录默认、字体）需相应调整。
+## 平台支持 / Platforms
+
+| 平台 | 状态 | 说明 |
+| --- | --- | --- |
+| Windows | ✅ 推荐 | 单一 exe，双击即用 |
+| Linux | ✅ 支持 | 需图形环境（X11/Wayland + OpenGL）；CI 发布的 tar 包已内含 CJK 字体，解压后即可显示中文 |
+| macOS | ⚠️ 可编译 | 未提供官方构建，需自行 `cargo build --release` |
+
+> 注：打 `v*` tag 推送到 GitHub 会自动触发 CI，分别产出 Windows exe 与 Linux tar 包（见 `.github/workflows/release.yml`）。
 
 ---
 

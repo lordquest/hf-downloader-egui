@@ -31,3 +31,37 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-linux:
+    name: Build Linux binary
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Download a CJK font for self-contained Chinese rendering
+        # Noto Sans CJK (OFL license, see fonts/OFL.txt). Bundled into the
+        # release so the Linux binary shows Chinese without a system CJK font.
+        run: |
+          curl -fsSL -o fonts/NotoSansCJKsc-Regular.otf \
+            "https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf" \
+            || echo "::warning::CJK font download failed; Linux build will rely on system fonts"
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Package release tarball
+        run: |
+          tar -czf hf-downloader-egui-linux.tar.gz -C target/release \
+            hf-downloader-egui lang fonts
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: hf-downloader-egui-linux.tar.gz
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
