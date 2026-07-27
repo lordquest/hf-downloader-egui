@@ -65,3 +65,50 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-macos:
+    name: Build macOS universal binary
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable) with macOS targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - name: Download a CJK font for self-contained Chinese rendering
+        # Noto Sans CJK (OFL license, see fonts/OFL.txt). Bundled into the
+        # release so the macOS binary shows Chinese without a system CJK font.
+        run: |
+          curl -fsSL -o fonts/NotoSansCJKsc-Regular.otf \
+            "https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf" \
+            || echo "::warning::CJK font download failed; macOS build will rely on system fonts"
+
+      - name: Build release for both architectures
+        run: |
+          cargo build --release --target x86_64-apple-darwin
+          cargo build --release --target aarch64-apple-darwin
+
+      - name: Create universal binary
+        run: |
+          lipo -create -output hf-downloader-egui \
+            target/x86_64-apple-darwin/release/hf-downloader-egui \
+            target/aarch64-apple-darwin/release/hf-downloader-egui
+
+      - name: Package release tarball
+        run: |
+          mkdir -p pkg
+          cp hf-downloader-egui pkg/
+          cp -R target/aarch64-apple-darwin/release/lang pkg/
+          cp -R target/aarch64-apple-darwin/release/fonts pkg/
+          tar -czf hf-downloader-egui-macos.tar.gz -C pkg .
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: hf-downloader-egui-macos.tar.gz
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

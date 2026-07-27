@@ -79,7 +79,7 @@ No recompile needed.
 
 ## About
 
-- **Version**: `0.1.0` (from `Cargo.toml`, read at runtime via `CARGO_PKG_VERSION`)
+- **Version**: `0.2.0` (from `Cargo.toml`, read at runtime via `CARGO_PKG_VERSION`)
 - **Author**: lordquest@163.com
 
 Accessible any time from the top-bar right-click menu or the "About" button.
@@ -100,9 +100,9 @@ Accessible any time from the top-bar right-click menu or the "About" button.
 | --- | --- | --- |
 | Windows | ✅ recommended | single exe, double-click to run |
 | Linux | ✅ supported | needs a graphical environment (X11/Wayland + OpenGL); the CI tarball already bundles a CJK font so Chinese renders after extraction |
-| macOS | ⚠️ compiles | no official build provided; run `cargo build --release` yourself |
+| macOS | ✅ supported | needs a graphical environment; CI produces a universal binary (Intel + Apple Silicon) tarball — extract and run (unsigned, so on first launch you may need `xattr -cr hf-downloader-egui` in Terminal) |
 
-> Note: pushing a `v*` tag to GitHub triggers CI that produces the Windows exe and a Linux tarball (see `.github/workflows/release.yml`).
+> Note: pushing a `v*` tag to GitHub triggers CI that produces the Windows exe, a Linux tarball, and a macOS universal-binary tarball (see `.github/workflows/release.yml`).
 
 ---
 

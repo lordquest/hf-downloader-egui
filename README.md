@@ -81,7 +81,7 @@ cargo build --release
 
 ## 关于 / About
 
-- **版本 / Version**：`0.1.0`（见 `Cargo.toml`，运行时从 `CARGO_PKG_VERSION` 读取）
+- **版本 / Version**：`0.2.0`（见 `Cargo.toml`，运行时从 `CARGO_PKG_VERSION` 读取）
 - **作者 / Author**：lordquest@163.com
 
 顶栏右键菜单或「关于」按钮可随时查看。
@@ -102,9 +102,9 @@ cargo build --release
 | --- | --- | --- |
 | Windows | ✅ 推荐 | 单一 exe，双击即用 |
 | Linux | ✅ 支持 | 需图形环境（X11/Wayland + OpenGL）；CI 发布的 tar 包已内含 CJK 字体，解压后即可显示中文 |
-| macOS | ⚠️ 可编译 | 未提供官方构建，需自行 `cargo build --release` |
+| macOS | ✅ 支持 | 需图形环境；CI 产出通用二进制（Intel + Apple Silicon）tar 包，解压即可运行（未签名，首次运行可能需在终端执行 `xattr -cr hf-downloader-egui`） |
 
-> 注：打 `v*` tag 推送到 GitHub 会自动触发 CI，分别产出 Windows exe 与 Linux tar 包（见 `.github/workflows/release.yml`）。
+> 注：打 `v*` tag 推送到 GitHub 会自动触发 CI，分别产出 Windows exe、Linux tar 包与 macOS 通用二进制 tar 包（见 `.github/workflows/release.yml`）。
 
 ---
 

@@ -356,7 +356,7 @@ impl eframe::App for App {
             .show(ctx, |ui| {
                 ui.vertical(|ui| {
                     ui.label(self.t("repo_placeholder"));
-                    bordered_edit(ui, &mut self.repo_input);
+                    bordered_edit(ui, &mut self.repo_input, f32::INFINITY);
                     ui.horizontal(|ui| {
                         if ui.button(self.t("list_files")).clicked() && !self.busy {
                             self.list_files_async();
@@ -482,7 +482,8 @@ impl eframe::App for App {
                 .show(ctx, |ui| {
                     ui.label(self.t("download_dir"));
                     ui.horizontal(|ui| {
-                        bordered_edit(ui, &mut self.config.download_dir);
+                        let w = ui.available_width().min(420.0);
+                        bordered_edit(ui, &mut self.config.download_dir, w);
                         if ui.button(self.t("browse")).clicked() {
                             if let Some(f) = rfd::FileDialog::new().pick_folder() {
                                 self.config.download_dir = f.to_string_lossy().to_string();
@@ -491,7 +492,8 @@ impl eframe::App for App {
                         }
                     });
                     ui.label(self.t("endpoint"));
-                    bordered_edit(ui, &mut self.config.endpoint);
+                    let w = ui.available_width().min(420.0);
+                    bordered_edit(ui, &mut self.config.endpoint, w);
                     ui.separator();
                     ui.horizontal(|ui| {
                         if ui.button(self.t("save")).clicked() {
@@ -511,7 +513,7 @@ impl eframe::App for App {
             egui::Window::new(self.t("token_dialog_title"))
                 .show(ctx, |ui| {
                     ui.label(self.t("token_placeholder"));
-                    bordered_edit(ui, &mut self.token_input);
+                    bordered_edit(ui, &mut self.token_input, f32::INFINITY);
                     ui.horizontal(|ui| {
                         if ui.button(self.t("login")).clicked() {
                             self.login_async();
@@ -676,8 +678,9 @@ fn font_candidates() -> Vec<std::path::PathBuf> {
 }
 
 /// A single-line text box with a black border and white background so it stands
-/// out, regardless of the active theme.
-fn bordered_edit(ui: &mut egui::Ui, text: &mut String) {
+/// out, regardless of the active theme. `desired_width` controls how wide it is
+/// (use `f32::INFINITY` to fill the available space).
+fn bordered_edit(ui: &mut egui::Ui, text: &mut String, desired_width: f32) {
     egui::Frame::none()
         .stroke(egui::Stroke::new(1.5_f32, egui::Color32::BLACK))
         .fill(egui::Color32::WHITE)
@@ -685,7 +688,7 @@ fn bordered_edit(ui: &mut egui::Ui, text: &mut String) {
         .show(ui, |ui| {
             ui.add(
                 egui::TextEdit::singleline(text)
-                    .desired_width(f32::INFINITY)
+                    .desired_width(desired_width)
                     .frame(false)
                     .text_color(egui::Color32::BLACK),
             );
