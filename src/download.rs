@@ -125,6 +125,19 @@ impl TaskManager {
     ) -> Arc<Mutex<DownloadTask>> {
         let mut tasks = self.tasks.lock().await;
         if let Some(t) = tasks.get(task_id) {
+            // Reuse the existing task, but apply any settings the user changed since it was
+            // created (mirror endpoint / download dir / revision). Without this, a "continue"
+            // after switching to a mirror endpoint would silently keep using the old endpoint.
+            let mut task = t.lock().await;
+            task.endpoint = endpoint.to_string();
+            task.target_dir = target_dir.to_string();
+            task.repo_type = repo_type.to_string();
+            task.revision = revision.to_string();
+            // Clear a previous cancellation so the (re)start actually proceeds. The
+            // `cancelled` flag was only ever set to true on cancel and never reset, which
+            // made every "continue"/retry instantly bail out (no resume possible).
+            task.cancelled.store(false, Ordering::Relaxed);
+            drop(task);
             t.clone()
         } else {
             let task = Arc::new(Mutex::new(DownloadTask::new(
@@ -229,9 +242,6 @@ async fn download_file(
     {
         let mut t = task.lock().await;
         if let Some(f) = t.files.get_mut(file_path) {
-            if f.status == FileStatus::Cancelled {
-                return;
-            }
             f.status = FileStatus::Downloading;
         }
     }
@@ -243,299 +253,306 @@ async fn download_file(
         let _ = fs::create_dir_all(parent).await;
     }
 
-    // Check resume: if file exists and is complete
-    let total = {
-        let t = task.lock().await;
-        t.files.get(file_path).map(|f| f.total).unwrap_or(0)
-    };
-
-    let existing_size = if local_path.exists() {
-        fs::metadata(&local_path).await.map(|m| m.len()).unwrap_or(0)
-    } else {
-        0
-    };
-
-    if existing_size > 0 && total > 0 && existing_size >= total {
-        {
-            let mut t = task.lock().await;
-            if let Some(f) = t.files.get_mut(file_path) {
-                f.status = FileStatus::Exists;
-                f.downloaded = existing_size;
-                f.total = existing_size;
-            }
-        }
-        send_file(&tx, &task, file_path).await;
-        return;
-    }
-
-    // Build download URL
-    let base = if endpoint.is_empty() {
-        "https://huggingface.co".to_string()
-    } else {
-        endpoint.trim_end_matches('/').to_string()
-    };
-    let type_prefix = match repo_type.as_str() {
-        "model" => "",
-        "dataset" => "datasets/",
-        "space" => "spaces/",
-        _ => "",
-    };
-    let url = format!(
-        "{}/{}{}/resolve/{}/{}",
-        base, type_prefix, repo_id, revision, file_path
-    );
-
-    // Download with resume support.
-    // Use HTTP/2 by default (reqwest needs the `http2` feature compiled in). huggingface_hub
-    // / Python's httpx also use HTTP/2, and HF's resolve-cache proxy streams reliably over
-    // HTTP/2. Forcing HTTP/1.1 here was the cause of the ~80KB mid-stream stall: the proxy
-    // keeps the HTTP/1.1 connection open without ever signalling EOF, so the body read hangs.
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(30))
-        .read_timeout(std::time::Duration::from_secs(60))
-        .tcp_keepalive(std::time::Duration::from_secs(30))
-        .build()
-        .unwrap_or_default();
-    let mut req = client
-        .get(&url)
-        .header("User-Agent", "hf-downloader-egui/0.1");
-
-    // Attach token
-    if let Some(token) = read_token() {
-        req = req.bearer_auth(token);
-    }
-
-    // Resume from existing_size
-    if existing_size > 0 {
-        req = req.header("Range", format!("bytes={}-", existing_size));
-    }
-
-    let resp = match req.send().await {
-        Ok(r) => r,
-        Err(e) => {
-            {
-                let mut t = task.lock().await;
-                if let Some(f) = t.files.get_mut(file_path) {
-                    f.status = FileStatus::Failed;
-                    f.error = Some(format!("{}: {}", i18n::t("err_request", &lang), e));
-                }
-            }
-            send_file(&tx, &task, file_path).await;
-            return;
-        }
-    };
-
-    let status = resp.status();
-    if !status.is_success() && status != reqwest::StatusCode::PARTIAL_CONTENT {
-        {
-            let mut t = task.lock().await;
-            if let Some(f) = t.files.get_mut(file_path) {
-                f.status = FileStatus::Failed;
-                f.error = Some(format!("HTTP {}", status));
-            }
-        }
-        send_file(&tx, &task, file_path).await;
-        return;
-    }
-
-    // Determine total size.
-    // NOTE: hf-mirror's resolve-cache returns `Content-Length: None`. Fall back to the
-    // size we already know from the file list, so the UI shows a real total and we can
-    // detect completion even when the stream never sends EOF (proxy keeps connection open).
     let known_total = {
         let t = task.lock().await;
         t.files.get(file_path).map(|f| f.total).unwrap_or(0)
     };
-    let content_length = resp.content_length().unwrap_or(0);
-    let file_total = if status == reqwest::StatusCode::PARTIAL_CONTENT {
-        existing_size + content_length
-    } else if content_length > 0 {
-        content_length
-    } else {
-        known_total
-    };
 
-    // Update total
-    {
-        let mut t = task.lock().await;
-        if let Some(f) = t.files.get_mut(file_path) {
-            f.total = file_total;
-            f.downloaded = existing_size;
-        }
-    }
+    // Bounded retries so a transient network blip (the cause of "unstable speed" that
+    // otherwise failed the whole file) heals itself. Each retry re-reads the on-disk
+    // size, so it truly resumes from where it left off.
+    const MAX_ATTEMPTS: u32 = 4; // 1 initial attempt + up to 3 retries
+    let mut attempt: u32 = 0;
+    #[allow(unused_assignments)]
+    let mut file_total = 0u64;
 
-    // Open file for writing (append if resuming)
-    let mut file = if existing_size > 0 && status == reqwest::StatusCode::PARTIAL_CONTENT {
-        match OpenOptions::new().append(true).open(&local_path).await {
-            Ok(f) => f,
-            Err(e) => {
-                {
-                    let mut t = task.lock().await;
-                    if let Some(f) = t.files.get_mut(file_path) {
-                        f.status = FileStatus::Failed;
-                        f.error = Some(format!("{}: {}", i18n::t("err_open_file", &lang), e));
-                    }
-                }
-                send_file(&tx, &task, file_path).await;
-                return;
-            }
-        }
-    } else {
-        match File::create(&local_path).await {
-            Ok(f) => f,
-            Err(e) => {
-                {
-                    let mut t = task.lock().await;
-                    if let Some(f) = t.files.get_mut(file_path) {
-                        f.status = FileStatus::Failed;
-                        f.error = Some(format!("{}: {}", i18n::t("err_create_file", &lang), e));
-                    }
-                }
-                send_file(&tx, &task, file_path).await;
-                return;
-            }
-        }
-    };
-
-    // Stream download using the standard `bytes_stream()` (HTTP/2 friendly).
-    let mut downloaded = existing_size;
-    let mut last_time = std::time::Instant::now();
-    let mut last_bytes = downloaded;
-    let mut last_progress = std::time::Instant::now();
-    let mut emit_counter = 0u32;
-    let read_timeout = std::time::Duration::from_secs(60);
-
-    let mut stream = resp.bytes_stream();
-    loop {
-        // Check cancel
+    'download: loop {
+        // Honour cancellation at the top of every (re)attempt.
         if cancelled.load(Ordering::Relaxed) {
+            mark_cancelled(&task, &tx, file_path).await;
+            return;
+        }
+
+        let existing_size = if local_path.exists() {
+            fs::metadata(&local_path).await.map(|m| m.len()).unwrap_or(0)
+        } else {
+            0
+        };
+
+        // Already complete?
+        if known_total > 0 && existing_size >= known_total {
             {
                 let mut t = task.lock().await;
                 if let Some(f) = t.files.get_mut(file_path) {
-                    f.status = FileStatus::Cancelled;
+                    f.status = FileStatus::Exists;
+                    f.downloaded = existing_size;
+                    f.total = if f.total > 0 { f.total } else { existing_size };
                 }
             }
             send_file(&tx, &task, file_path).await;
-            return;
-        }
-        {
-            let is_cancelled = {
-                let t = task.lock().await;
-                t.files
-                    .get(file_path)
-                    .map(|f| f.status == FileStatus::Cancelled)
-                    .unwrap_or(false)
-            };
-            if is_cancelled {
-                send_file(&tx, &task, file_path).await;
-                return;
-            }
+            break 'download;
         }
 
-        let item = stream.next().await;
-        let bytes = match item {
-            Some(Ok(b)) => b,
-            Some(Err(e)) => {
-                {
-                    let mut t = task.lock().await;
-                    if let Some(f) = t.files.get_mut(file_path) {
-                        f.status = FileStatus::Failed;
-                        f.error = Some(format!("{}: {}", i18n::t("err_download_interrupted", &lang), e));
-                    }
+        // Build download URL
+        let base = if endpoint.trim().is_empty() {
+            "https://huggingface.co".to_string()
+        } else {
+            endpoint.trim_end_matches('/').to_string()
+        };
+        let type_prefix = match repo_type.as_str() {
+            "model" => "",
+            "dataset" => "datasets/",
+            "space" => "spaces/",
+            _ => "",
+        };
+        let url = format!(
+            "{}/{}{}/resolve/{}/{}",
+            base, type_prefix, repo_id, revision, file_path
+        );
+
+        // Download with resume support.
+        // Use HTTP/2 by default (reqwest needs the `http2` feature compiled in). huggingface_hub
+        // / Python's httpx also use HTTP/2, and HF's resolve-cache proxy streams reliably over
+        // HTTP/2. Forcing HTTP/1.1 here was the cause of the ~80KB mid-stream stall: the proxy
+        // keeps the HTTP/1.1 connection open without ever signalling EOF, so the body read hangs.
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .read_timeout(std::time::Duration::from_secs(60))
+            .tcp_keepalive(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_default();
+        let mut req = client
+            .get(&url)
+            .header("User-Agent", concat!("hf-downloader-egui/", env!("CARGO_PKG_VERSION")));
+
+        // Attach token
+        if let Some(token) = read_token() {
+            req = req.bearer_auth(token);
+        }
+
+        // Resume from existing_size (mirrors/official both honour Range; if a server
+        // ignores it and returns 200 we fall back to a clean re-download below).
+        if existing_size > 0 {
+            req = req.header("Range", format!("bytes={}-", existing_size));
+        }
+
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                if attempt < MAX_ATTEMPTS && !cancelled.load(Ordering::Relaxed) {
+                    attempt += 1;
+                    backoff(attempt).await;
+                    continue 'download;
                 }
-                send_file(&tx, &task, file_path).await;
+                fail(
+                    &task,
+                    &tx,
+                    file_path,
+                    format!("{}: {}", i18n::t("err_request", &lang), e),
+                )
+                .await;
                 return;
-            }
-            None => {
-                break;
             }
         };
 
-        if bytes.is_empty() {
-            // Some proxies keep the connection open and emit empty frames after the body
-            // is done. If we've made no real progress for `read_timeout`, treat it as a
-            // stall instead of spinning forever.
-            if last_progress.elapsed() > read_timeout {
-                {
-                    let mut t = task.lock().await;
-                    if let Some(f) = t.files.get_mut(file_path) {
-                        f.status = FileStatus::Failed;
-                        f.error = Some(i18n::t("err_timeout", &lang));
-                    }
+        let status = resp.status();
+        if !status.is_success() && status != reqwest::StatusCode::PARTIAL_CONTENT {
+            // Retry on transient server errors / rate limits; give up on auth/not-found.
+            let retryable = status == reqwest::StatusCode::REQUEST_TIMEOUT
+                || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                || status.as_u16() >= 500;
+            if retryable && attempt < MAX_ATTEMPTS && !cancelled.load(Ordering::Relaxed) {
+                attempt += 1;
+                backoff(attempt).await;
+                continue 'download;
+            }
+            fail(&task, &tx, file_path, format!("HTTP {}", status)).await;
+            return;
+        }
+
+        // Determine total size.
+        // NOTE: hf-mirror's resolve-cache returns `Content-Length: None`. Fall back to the
+        // size we already know from the file list, so the UI shows a real total and we can
+        // detect completion even when the stream never sends EOF (proxy keeps connection open).
+        let content_length = resp.content_length().unwrap_or(0);
+        file_total = if status == reqwest::StatusCode::PARTIAL_CONTENT {
+            existing_size + content_length
+        } else if content_length > 0 {
+            content_length
+        } else {
+            known_total
+        };
+
+        // Open file for writing (append if resuming via 206; otherwise create/truncate).
+        let mut file = if existing_size > 0 && status == reqwest::StatusCode::PARTIAL_CONTENT {
+            match OpenOptions::new().append(true).open(&local_path).await {
+                Ok(f) => f,
+                Err(e) => {
+                    fail(
+                        &task,
+                        &tx,
+                        file_path,
+                        format!("{}: {}", i18n::t("err_open_file", &lang), e),
+                    )
+                    .await;
+                    return;
                 }
-                send_file(&tx, &task, file_path).await;
+            }
+        } else {
+            match File::create(&local_path).await {
+                Ok(f) => f,
+                Err(e) => {
+                    fail(
+                        &task,
+                        &tx,
+                        file_path,
+                        format!("{}: {}", i18n::t("err_create_file", &lang), e),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        };
+
+        // Stream download using the standard `bytes_stream()` (HTTP/2 friendly).
+        let mut downloaded = existing_size;
+        let mut last_time = std::time::Instant::now();
+        let mut last_bytes = downloaded;
+        let mut last_progress = std::time::Instant::now();
+        let mut emit_counter = 0u32;
+        let read_timeout = std::time::Duration::from_secs(60);
+
+        let mut stream = resp.bytes_stream();
+        let mut fatal = false;
+        let mut fatal_msg = String::new();
+        'stream: loop {
+            // Check cancel
+            if cancelled.load(Ordering::Relaxed) {
+                mark_cancelled(&task, &tx, file_path).await;
                 return;
             }
-            continue;
-        }
+            {
+                let is_cancelled = {
+                    let t = task.lock().await;
+                    t.files
+                        .get(file_path)
+                        .map(|f| f.status == FileStatus::Cancelled)
+                        .unwrap_or(false)
+                };
+                if is_cancelled {
+                    mark_cancelled(&task, &tx, file_path).await;
+                    return;
+                }
+            }
+
+            let item = stream.next().await;
+            let bytes = match item {
+                Some(Ok(b)) => b,
+                Some(Err(e)) => {
+                    fatal_msg = format!(
+                        "{}: {}",
+                        i18n::t("err_download_interrupted", &lang),
+                        e
+                    );
+                    fatal = true;
+                    break 'stream;
+                }
+                None => break 'stream,
+            };
+
+            if bytes.is_empty() {
+                // Some proxies keep the connection open and emit empty frames after the body
+                // is done. If we've made no real progress for `read_timeout`, treat it as a
+                // stall instead of spinning forever.
+                if last_progress.elapsed() > read_timeout {
+                    fatal_msg = i18n::t("err_timeout", &lang);
+                    fatal = true;
+                    break 'stream;
+                }
+                continue;
+            }
             if let Err(e) = file.write_all(&bytes).await {
+                fatal_msg = format!("{}: {}", i18n::t("err_write", &lang), e);
+                fatal = true;
+                break 'stream;
+            }
+            downloaded += bytes.len() as u64;
+            last_progress = std::time::Instant::now();
+
+            // Safety net: if the proxy never sends EOF but we already have the expected number
+            // of bytes, treat the download as complete.
+            if file_total > 0 && downloaded >= file_total {
+                break 'stream;
+            }
+
+            // Calculate speed & emit progress (throttled)
+            emit_counter += 1;
+            let now = std::time::Instant::now();
+            let elapsed = now.duration_since(last_time).as_secs_f64();
+
+            if elapsed > 0.3 || emit_counter % 50 == 0 {
+                let file_snapshot = {
+                    let mut t = task.lock().await;
+                    if let Some(f) = t.files.get_mut(file_path) {
+                        f.downloaded = downloaded;
+                        if elapsed > 0.3 {
+                            // Real measurement over the elapsed window; smooth it with an EMA
+                            // so the displayed number doesn't jump around frame to frame.
+                            let s = (downloaded - last_bytes) as f64 / elapsed;
+                            last_time = now;
+                            last_bytes = downloaded;
+                            f.speed = f.speed * 0.4 + s * 0.6;
+                        }
+                        // On the 50-chunk throttle path (elapsed <= 0.3s) we keep the previous
+                        // speed instead of zeroing it, otherwise the UI hides/shows the speed
+                        // label every few chunks and it flickers.
+                    }
+                    t.files.get(file_path).cloned()
+                };
+                if let Some(f) = file_snapshot {
+                    send_progress(&tx, f);
+                }
+            }
+        }
+
+        // Flush
+        let _ = file.flush().await;
+
+        if fatal {
+            // Persist how much we actually got before (possibly) retrying or failing.
             {
                 let mut t = task.lock().await;
                 if let Some(f) = t.files.get_mut(file_path) {
-                    f.status = FileStatus::Failed;
-                    f.error = Some(format!("{}: {}", i18n::t("err_write", &lang), e));
+                    f.downloaded = downloaded;
                 }
             }
             send_file(&tx, &task, file_path).await;
+            if attempt < MAX_ATTEMPTS && !cancelled.load(Ordering::Relaxed) {
+                attempt += 1;
+                backoff(attempt).await;
+                continue 'download;
+            }
+            fail(&task, &tx, file_path, fatal_msg).await;
             return;
         }
-        downloaded += bytes.len() as u64;
-        last_progress = std::time::Instant::now();
 
-        // Safety net: if the proxy never sends EOF but we already have the expected number
-        // of bytes, treat the download as complete.
-        if file_total > 0 && downloaded >= file_total {
-            break;
-        }
-
-        // Calculate speed & emit progress (throttled)
-        emit_counter += 1;
-        let now = std::time::Instant::now();
-        let elapsed = now.duration_since(last_time).as_secs_f64();
-
-        if elapsed > 0.3 || emit_counter % 50 == 0 {
-            let file_snapshot = {
-                let mut t = task.lock().await;
-                if let Some(f) = t.files.get_mut(file_path) {
+        // Mark done
+        {
+            let mut t = task.lock().await;
+            if let Some(f) = t.files.get_mut(file_path) {
+                if cancelled.load(Ordering::Relaxed) {
+                    f.status = FileStatus::Cancelled;
+                } else {
+                    f.status = FileStatus::Done;
                     f.downloaded = downloaded;
-                    if elapsed > 0.3 {
-                        // Real measurement over the elapsed window; smooth it with an EMA
-                        // so the displayed number doesn't jump around frame to frame.
-                        let s = (downloaded - last_bytes) as f64 / elapsed;
-                        last_time = now;
-                        last_bytes = downloaded;
-                        f.speed = f.speed * 0.4 + s * 0.6;
-                    }
-                    // On the 50-chunk throttle path (elapsed <= 0.3s) we keep the previous
-                    // speed instead of zeroing it, otherwise the UI hides/shows the speed
-                    // label every few chunks and it flickers.
+                    f.total = if file_total > 0 { file_total } else { downloaded };
+                    f.speed = 0.0;
                 }
-                t.files.get(file_path).cloned()
-            };
-            if let Some(f) = file_snapshot {
-                send_progress(&tx, f);
             }
         }
+        send_file(&tx, &task, file_path).await;
+        break 'download;
     }
-
-    // Flush
-    let _ = file.flush().await;
-
-    // Mark done
-    {
-        let mut t = task.lock().await;
-        if let Some(f) = t.files.get_mut(file_path) {
-            if cancelled.load(Ordering::Relaxed) {
-                f.status = FileStatus::Cancelled;
-            } else {
-                f.status = FileStatus::Done;
-                f.downloaded = downloaded;
-                f.total = if file_total > 0 { file_total } else { downloaded };
-                f.speed = 0.0;
-            }
-        }
-    }
-    send_file(&tx, &task, file_path).await;
 
     // Check if all done
     let all_done = {
@@ -565,4 +582,35 @@ async fn send_file(tx: &Sender<UiMsg>, task: &Arc<Mutex<DownloadTask>>, file_pat
         }
     };
     send_progress(tx, file);
+}
+
+async fn mark_cancelled(task: &Arc<Mutex<DownloadTask>>, tx: &Sender<UiMsg>, file_path: &str) {
+    {
+        let mut t = task.lock().await;
+        if let Some(f) = t.files.get_mut(file_path) {
+            f.status = FileStatus::Cancelled;
+        }
+    }
+    send_file(tx, task, file_path).await;
+}
+
+async fn fail(task: &Arc<Mutex<DownloadTask>>, tx: &Sender<UiMsg>, file_path: &str, msg: String) {
+    {
+        let mut t = task.lock().await;
+        if let Some(f) = t.files.get_mut(file_path) {
+            f.status = FileStatus::Failed;
+            f.error = Some(msg);
+        }
+    }
+    send_file(tx, task, file_path).await;
+}
+
+/// Exponential-ish backoff between retry attempts (capped).
+async fn backoff(attempt: u32) {
+    let secs = [1u64, 2, 5, 10];
+    let s = secs
+        .get((attempt as usize).saturating_sub(1))
+        .copied()
+        .unwrap_or(10);
+    tokio::time::sleep(std::time::Duration::from_secs(s)).await;
 }

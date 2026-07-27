@@ -94,6 +94,9 @@ impl DownloadEngine {
             if let Some(task) = tasks.get(&task_id) {
                 let size = {
                     let mut t = task.lock().await;
+                    // Clear the task-level cancellation so this retry actually proceeds
+                    // (the flag is only ever set on cancel and must be reset to continue).
+                    t.cancelled.store(false, std::sync::atomic::Ordering::Relaxed);
                     if let Some(f) = t.files.get_mut(&fp) {
                         f.status = FileStatus::Pending;
                         f.downloaded = 0;
