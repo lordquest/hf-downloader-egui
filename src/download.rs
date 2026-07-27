@@ -614,3 +614,266 @@ async fn backoff(attempt: u32) {
         .unwrap_or(10);
     tokio::time::sleep(std::time::Duration::from_secs(s)).await;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::thread;
+
+    struct ServerHandle {
+        url: String,
+        #[allow(dead_code)]
+        handle: thread::JoinHandle<()>,
+    }
+
+    /// Serve `blob` over HTTP/1.1 with Range support. The first `fail_first`
+    /// connections return 500 (to exercise the retry path), then it serves 200/206.
+    fn serve_blob(blob: Arc<Vec<u8>>, fail_first: Arc<AtomicUsize>) -> ServerHandle {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = match stream {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                if fail_first.load(Ordering::SeqCst) > 0 {
+                    fail_first.fetch_sub(1, Ordering::SeqCst);
+                    let body = b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = stream.write_all(body);
+                    let _ = stream.flush();
+                    continue;
+                }
+                // Parse "Range: bytes=START-"
+                let start: usize = {
+                    let low = req.to_ascii_lowercase();
+                    if let Some(pos) = low.find("range:") {
+                        let rest = &req[pos + 6..];
+                        let end = rest
+                            .find("\r\n")
+                            .unwrap_or_else(|| rest.find('\n').unwrap_or(rest.len()));
+                        let val = rest[..end].trim().to_string();
+                        val.split('=')
+                            .nth(1)
+                            .and_then(|r| r.trim_end_matches('-').parse::<usize>().ok())
+                            .unwrap_or(0)
+                    } else {
+                        0
+                    }
+                };
+                let total = blob.len();
+                if start > 0 && start < total {
+                    let body = &blob[start..];
+                    let headers = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {}-{}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        start,
+                        total - 1,
+                        total,
+                        body.len()
+                    );
+                    let _ = stream.write_all(headers.as_bytes());
+                    let _ = stream.write_all(body);
+                } else {
+                    let headers = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        total
+                    );
+                    let _ = stream.write_all(headers.as_bytes());
+                    let _ = stream.write_all(&blob);
+                }
+                let _ = stream.flush();
+            }
+        });
+        ServerHandle {
+            url: format!("http://{}", addr),
+            handle,
+        }
+    }
+
+    fn run_download(task: Arc<Mutex<DownloadTask>>, file_path: &str, lang: &str) {
+        let (tx, _rx) = mpsc::channel::<UiMsg>();
+        download_runtime().block_on(download_file(
+            task,
+            tx,
+            "task-test",
+            file_path,
+            lang.to_string(),
+        ));
+    }
+
+    fn file_state(task: &Arc<Mutex<DownloadTask>>) -> (FileStatus, u64, u64) {
+        download_runtime().block_on(async {
+            let t = task.lock().await;
+            let f = t.files.get("file.bin").unwrap();
+            (f.status.clone(), f.downloaded, f.total)
+        })
+    }
+
+    #[test]
+    fn full_download_succeeds() {
+        let blob: Arc<Vec<u8>> = Arc::new((0u8..=255).cycle().take(200_000).collect());
+        let srv = serve_blob(blob.clone(), Arc::new(AtomicUsize::new(0)));
+        let dir = std::env::temp_dir().join(format!("hf_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let out = dir.join("file.bin");
+        let _ = std::fs::remove_file(&out);
+        let task = Arc::new(Mutex::new({
+            let mut t = DownloadTask::new(
+                "repo".into(),
+                "model".into(),
+                "main".into(),
+                dir.to_string_lossy().to_string(),
+                srv.url.clone(),
+            );
+            t.files.insert(
+                "file.bin".into(),
+                FileState {
+                    path: "file.bin".into(),
+                    status: FileStatus::Pending,
+                    downloaded: 0,
+                    total: blob.len() as u64,
+                    speed: 0.0,
+                    error: None,
+                },
+            );
+            t
+        }));
+        run_download(task.clone(), "file.bin", "en");
+        let (st, dl, _) = file_state(&task);
+        assert_eq!(st, FileStatus::Done, "expected Done");
+        assert_eq!(dl, blob.len() as u64);
+        assert_eq!(std::fs::read(&out).unwrap(), *blob);
+        let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn resume_after_cancel_continues() {
+        let blob: Arc<Vec<u8>> = Arc::new((0u8..=255).cycle().take(200_000).collect());
+        let srv = serve_blob(blob.clone(), Arc::new(AtomicUsize::new(0)));
+        let dir = std::env::temp_dir().join(format!("hf_test_resume_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let out = dir.join("file.bin");
+        let _ = std::fs::remove_file(&out);
+        let partial = (blob.len() as f64 * 0.4) as usize;
+        std::fs::write(&out, &blob[..partial]).unwrap();
+        let task = Arc::new(Mutex::new({
+            let mut t = DownloadTask::new(
+                "repo".into(),
+                "model".into(),
+                "main".into(),
+                dir.to_string_lossy().to_string(),
+                srv.url.clone(),
+            );
+            // Simulate the bug: a previously cancelled task whose flag is stuck true.
+            t.cancelled.store(true, Ordering::SeqCst);
+            t.files.insert(
+                "file.bin".into(),
+                FileState {
+                    path: "file.bin".into(),
+                    status: FileStatus::Cancelled,
+                    downloaded: partial as u64,
+                    total: blob.len() as u64,
+                    speed: 0.0,
+                    error: None,
+                },
+            );
+            t
+        }));
+        // A real "continue" resets cancelled (get_or_create does this); emulate it:
+        download_runtime().block_on(async {
+            task.lock().await.cancelled.store(false, Ordering::SeqCst);
+        });
+        run_download(task.clone(), "file.bin", "en");
+        let (st, dl, _) = file_state(&task);
+        assert_eq!(st, FileStatus::Done, "resume should finish");
+        assert_eq!(dl, blob.len() as u64);
+        assert_eq!(
+            std::fs::read(&out).unwrap(),
+            *blob,
+            "resumed file must equal original"
+        );
+        let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn get_or_create_applies_new_endpoint() {
+        let mgr = TaskManager::new();
+        let rt = download_runtime();
+        let t1 = rt.block_on(mgr.get_or_create(
+            "task-x",
+            "repo",
+            "model",
+            "main",
+            "/tmp/a",
+            "https://huggingface.co",
+        ));
+        {
+            let t = rt.block_on(t1.lock());
+            assert_eq!(t.endpoint, "https://huggingface.co");
+        }
+        // Reuse with a new mirror endpoint + download dir.
+        let t2 = rt.block_on(mgr.get_or_create(
+            "task-x",
+            "repo",
+            "model",
+            "main",
+            "/tmp/b",
+            "https://hf-mirror.com",
+        ));
+        {
+            let t = rt.block_on(t2.lock());
+            assert_eq!(t.endpoint, "https://hf-mirror.com", "mirror endpoint must take effect on reuse");
+            assert_eq!(t.target_dir, "/tmp/b", "download dir must take effect on reuse");
+            assert!(
+                !t.cancelled.load(Ordering::SeqCst),
+                "cancelled must be reset on reuse"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_on_transient_errors_succeeds() {
+        let blob: Arc<Vec<u8>> = Arc::new((0u8..=255).cycle().take(120_000).collect());
+        let fails = Arc::new(AtomicUsize::new(2)); // fail first 2 attempts
+        let srv = serve_blob(blob.clone(), fails);
+        let dir = std::env::temp_dir().join(format!("hf_test_retry_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let out = dir.join("file.bin");
+        let _ = std::fs::remove_file(&out);
+        let task = Arc::new(Mutex::new({
+            let mut t = DownloadTask::new(
+                "repo".into(),
+                "model".into(),
+                "main".into(),
+                dir.to_string_lossy().to_string(),
+                srv.url.clone(),
+            );
+            t.files.insert(
+                "file.bin".into(),
+                FileState {
+                    path: "file.bin".into(),
+                    status: FileStatus::Pending,
+                    downloaded: 0,
+                    total: blob.len() as u64,
+                    speed: 0.0,
+                    error: None,
+                },
+            );
+            t
+        }));
+        run_download(task.clone(), "file.bin", "en");
+        let (st, dl, _) = file_state(&task);
+        assert_eq!(st, FileStatus::Done, "should succeed after retries");
+        assert_eq!(dl, blob.len() as u64);
+        assert_eq!(std::fs::read(&out).unwrap(), *blob);
+        let _ = std::fs::remove_file(&out);
+    }
+}
+
