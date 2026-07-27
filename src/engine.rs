@@ -1,6 +1,6 @@
 use std::sync::mpsc::Sender;
 
-use crate::download::{self, FileStatus, TaskManager};
+use crate::download::{self, TaskManager};
 use crate::hf_api::{FileEntry, RepoInfo, TokenStatus};
 
 /// Messages sent from the download/worker threads back to the egui UI thread.
@@ -83,12 +83,28 @@ impl DownloadEngine {
         });
     }
 
+    /// Test-only accessor to the engine's task registry (so tests can pre-seed a task
+    /// without going through `start`). Not used by the app.
+    #[cfg(test)]
+    pub(crate) fn _test_manager(&self) -> &TaskManager {
+        &self.manager
+    }
+
     /// Re-download a single failed/cancelled file.
-    pub fn retry(&self, task_id: &str, file_path: &str, lang: String) {
+    pub fn retry(
+        &self,
+        task_id: &str,
+        file_path: &str,
+        endpoint: &str,
+        target_dir: &str,
+        lang: String,
+    ) {
         // Clone the borrowed inputs to owned values so they survive into the `'static`
         // async block spawned on the download runtime.
         let task_id = task_id.to_string();
         let fp = file_path.to_string();
+        let ep = endpoint.to_string();
+        let td = target_dir.to_string();
         download::download_runtime().block_on(async {
             let tasks = self.manager.tasks.lock().await;
             if let Some(task) = tasks.get(&task_id) {
@@ -97,18 +113,18 @@ impl DownloadEngine {
                     // Clear the task-level cancellation so this retry actually proceeds
                     // (the flag is only ever set on cancel and must be reset to continue).
                     t.cancelled.store(false, std::sync::atomic::Ordering::Relaxed);
-                    if let Some(f) = t.files.get_mut(&fp) {
-                        f.status = FileStatus::Pending;
-                        f.downloaded = 0;
-                        f.error = None;
-                        f.total
-                    } else {
-                        return;
-                    }
+                    // Apply the latest endpoint / download dir so a retry after switching
+                    // to a mirror (e.g. hf-mirror.com) uses it, just like a fresh start.
+                    t.endpoint = ep.clone();
+                    t.target_dir = td.clone();
+                    // NOTE: do NOT pre-set the file to `Pending` here. `start_downloads`
+                    // resets `Failed`/`Cancelled` files itself and spawns them; if we set
+                    // `Pending` first it would skip the file and the retry would do nothing.
+                    t.files.get(&fp).map(|f| f.total).unwrap_or(0)
                 };
                 let tx = self.tx.clone();
                 let task = task.clone();
-                // Spawn just this one file again.
+                // Spawn just this one file again (start_downloads will reset its status).
                 download::download_runtime().spawn(async move {
                     download::start_downloads(task_id, task, vec![(fp, size)], tx, lang)
                         .await;

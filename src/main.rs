@@ -436,7 +436,25 @@ impl eframe::App for App {
                                         {
                                             if ui.button(self.t("retry")).clicked() {
                                                 if let Some(tid) = &self.active_task_id {
-                                                    self.engine.retry(tid, path, self.lang.clone());
+                                                    let target_dir = self
+                                                        .repo_info
+                                                        .as_ref()
+                                                        .map(|i| {
+                                                            crate::hf_api::target_dir_for(
+                                                                &i.repo_id,
+                                                                self.config.download_dir.trim(),
+                                                            )
+                                                        })
+                                                        .unwrap_or_else(|| {
+                                                            self.config.download_dir.trim().to_string()
+                                                        });
+                                                    self.engine.retry(
+                                                        tid,
+                                                        path,
+                                                        self.config.endpoint.trim(),
+                                                        &target_dir,
+                                                        self.lang.clone(),
+                                                    );
                                                 }
                                             }
                                         }

@@ -618,6 +618,7 @@ async fn backoff(attempt: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::DownloadEngine;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -872,6 +873,77 @@ mod tests {
         let (st, dl, _) = file_state(&task);
         assert_eq!(st, FileStatus::Done, "should succeed after retries");
         assert_eq!(dl, blob.len() as u64);
+        assert_eq!(std::fs::read(&out).unwrap(), *blob);
+        let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn retry_cancelled_file_resumes_with_new_endpoint() {
+        let blob: Arc<Vec<u8>> = Arc::new((0u8..=255).cycle().take(150_000).collect());
+        let srv = serve_blob(blob.clone(), Arc::new(AtomicUsize::new(0)));
+        let dir = std::env::temp_dir().join(format!("hf_test_retry2_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let out = dir.join("file.bin");
+        let _ = std::fs::remove_file(&out);
+
+        let (tx, _rx) = mpsc::channel::<UiMsg>();
+        let engine = DownloadEngine::new(tx);
+        let rt = download_runtime();
+        // Register the task in the ENGINE's own manager (with the OLD endpoint), as if the
+        // first download used huggingface.co. This is what engine.retry looks up.
+        let task = rt.block_on(
+            engine
+                ._test_manager()
+                .get_or_create("task-r", "repo", "model", "main", &dir.to_string_lossy().to_string(), "https://huggingface.co"),
+        );
+        // Simulate a stop: file Cancelled + task cancelled flag stuck true.
+        rt.block_on(async {
+            let mut t = task.lock().await;
+            t.cancelled.store(true, Ordering::SeqCst);
+            t.files.insert(
+                "file.bin".into(),
+                FileState {
+                    path: "file.bin".into(),
+                    status: FileStatus::Cancelled,
+                    downloaded: 0,
+                    total: blob.len() as u64,
+                    speed: 0.0,
+                    error: None,
+                },
+            );
+        });
+
+        // Retry with a NEW endpoint (the local mock server stands in for the mirror the
+        // user switched to). This is the real scenario: stop -> switch mirror -> retry.
+        let new_endpoint = srv.url.clone();
+        engine.retry(
+            "task-r",
+            "file.bin",
+            &new_endpoint,
+            &dir.to_string_lossy().to_string(),
+            "en".to_string(),
+        );
+
+        // Wait for the download to actually finish.
+        let done = rt.block_on(async {
+            for _ in 0..150 {
+                let st = {
+                    let t = task.lock().await;
+                    t.files.get("file.bin").unwrap().status.clone()
+                };
+                if st == FileStatus::Done {
+                    return true;
+                }
+                if st == FileStatus::Failed {
+                    return false;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            false
+        });
+        assert!(done, "retry of a cancelled file must actually download");
+        let ep = rt.block_on(async { task.lock().await.endpoint.clone() });
+        assert_eq!(ep, new_endpoint, "retry must apply the new endpoint");
         assert_eq!(std::fs::read(&out).unwrap(), *blob);
         let _ = std::fs::remove_file(&out);
     }
