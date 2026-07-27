@@ -110,7 +110,7 @@ impl App {
 
     fn check_token_async(&mut self) {
         let tx = self.engine.sender();
-        let endpoint = self.config.endpoint.clone();
+        let endpoint = self.config.endpoint.trim().to_string();
         let lang = self.lang.clone();
         std::thread::spawn(move || {
             let rt = download::download_runtime();
@@ -120,15 +120,16 @@ impl App {
     }
 
     fn list_files_async(&mut self) {
-        let input = self.repo_input.clone();
-        if input.trim().is_empty() {
+        let input = self.repo_input.trim().to_string();
+        self.repo_input = input.clone();
+        if input.is_empty() {
             self.status = StatusMsg::Tr("err_empty");
             return;
         }
         self.busy = true;
         self.status = StatusMsg::Tr("listing");
         let tx = self.engine.sender();
-        let endpoint = self.config.endpoint.clone();
+        let endpoint = self.config.endpoint.trim().to_string();
         let lang = self.lang.clone();
         std::thread::spawn(move || {
             let rt = download::download_runtime();
@@ -161,12 +162,12 @@ impl App {
     }
 
     fn login_async(&mut self) {
-        let token = self.token_input.clone();
-        if token.trim().is_empty() {
+        let token = self.token_input.trim().to_string();
+        if token.is_empty() {
             return;
         }
         let tx = self.engine.sender();
-        let endpoint = self.config.endpoint.clone();
+        let endpoint = self.config.endpoint.trim().to_string();
         let lang = self.lang.clone();
         std::thread::spawn(move || {
             let rt = download::download_runtime();
@@ -190,7 +191,7 @@ impl App {
             return;
         }
 
-        let target_dir = crate::hf_api::target_dir_for(&info.repo_id, &self.config.download_dir);
+        let target_dir = crate::hf_api::target_dir_for(&info.repo_id, self.config.download_dir.trim());
         let task_id = format!("task-{}", info.repo_id);
         let file_paths: Vec<(String, u64)> = self
             .file_entries
@@ -222,7 +223,7 @@ impl App {
             &info.repo_type,
             &info.revision,
             &target_dir,
-            &self.config.endpoint,
+            self.config.endpoint.trim(),
             file_paths,
             self.lang.clone(),
         );
@@ -355,16 +356,7 @@ impl eframe::App for App {
             .show(ctx, |ui| {
                 ui.vertical(|ui| {
                     ui.label(self.t("repo_placeholder"));
-                    egui::Frame::none()
-                        .stroke(egui::Stroke::new(1.5_f32, egui::Color32::BLACK))
-                        .inner_margin(egui::Margin::symmetric(6.0, 4.0))
-                        .show(ui, |ui| {
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.repo_input)
-                                    .desired_width(f32::INFINITY)
-                                    .frame(false),
-                            );
-                        });
+                    bordered_edit(ui, &mut self.repo_input);
                     ui.horizontal(|ui| {
                         if ui.button(self.t("list_files")).clicked() && !self.busy {
                             self.list_files_async();
@@ -407,7 +399,7 @@ impl eframe::App for App {
                     ui.separator();
                     if let Some(info) = &self.repo_info {
                         let target =
-                            crate::hf_api::target_dir_for(&info.repo_id, &self.config.download_dir);
+                            crate::hf_api::target_dir_for(&info.repo_id, self.config.download_dir.trim());
                         ui.label(format!("{}: {}", self.t("save_to"), target));
                     }
                     ui.separator();
@@ -490,7 +482,7 @@ impl eframe::App for App {
                 .show(ctx, |ui| {
                     ui.label(self.t("download_dir"));
                     ui.horizontal(|ui| {
-                        ui.text_edit_singleline(&mut self.config.download_dir);
+                        bordered_edit(ui, &mut self.config.download_dir);
                         if ui.button(self.t("browse")).clicked() {
                             if let Some(f) = rfd::FileDialog::new().pick_folder() {
                                 self.config.download_dir = f.to_string_lossy().to_string();
@@ -499,10 +491,12 @@ impl eframe::App for App {
                         }
                     });
                     ui.label(self.t("endpoint"));
-                    ui.text_edit_singleline(&mut self.config.endpoint);
+                    bordered_edit(ui, &mut self.config.endpoint);
                     ui.separator();
                     ui.horizontal(|ui| {
                         if ui.button(self.t("save")).clicked() {
+                            self.config.download_dir = self.config.download_dir.trim().to_string();
+                            self.config.endpoint = self.config.endpoint.trim().to_string();
                             self.save_config();
                             self.show_settings = false;
                         }
@@ -517,7 +511,7 @@ impl eframe::App for App {
             egui::Window::new(self.t("token_dialog_title"))
                 .show(ctx, |ui| {
                     ui.label(self.t("token_placeholder"));
-                    ui.text_edit_singleline(&mut self.token_input);
+                    bordered_edit(ui, &mut self.token_input);
                     ui.horizontal(|ui| {
                         if ui.button(self.t("login")).clicked() {
                             self.login_async();
@@ -679,6 +673,23 @@ fn font_candidates() -> Vec<std::path::PathBuf> {
         }
     }
     v
+}
+
+/// A single-line text box with a black border and white background so it stands
+/// out, regardless of the active theme.
+fn bordered_edit(ui: &mut egui::Ui, text: &mut String) {
+    egui::Frame::none()
+        .stroke(egui::Stroke::new(1.5_f32, egui::Color32::BLACK))
+        .fill(egui::Color32::WHITE)
+        .inner_margin(egui::Margin::symmetric(6.0, 4.0))
+        .show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::singleline(text)
+                    .desired_width(f32::INFINITY)
+                    .frame(false)
+                    .text_color(egui::Color32::BLACK),
+            );
+        });
 }
 
 fn main() -> eframe::Result<()> {
