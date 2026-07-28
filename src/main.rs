@@ -244,11 +244,10 @@ impl App {
                 UiMsg::RepoListed { info, entries } => {
                     self.repo_info = Some(info);
                     self.file_entries = entries;
-                    self.selected = self
-                        .file_entries
-                        .iter()
-                        .map(|e| e.path.clone())
-                        .collect();
+                    // Default to nothing selected — the user picks the files to
+                    // download. The "Select All" button is still there if they want
+                    // everything.
+                    self.selected.clear();
                     self.busy = false;
                     self.status =
                         StatusMsg::TrCount("listed", self.file_entries.len(), "files");
@@ -350,147 +349,177 @@ impl eframe::App for App {
             });
         });
 
-        egui::SidePanel::left("left")
-            .resizable(true)
-            .default_width(400.0)
-            .show(ctx, |ui| {
-                ui.vertical(|ui| {
-                    ui.label(self.t("repo_placeholder"));
-                    bordered_edit(ui, &mut self.repo_input, f32::INFINITY);
-                    ui.horizontal(|ui| {
-                        if ui.button(self.t("list_files")).clicked() && !self.busy {
-                            self.list_files_async();
-                        }
-                        if self.busy {
-                            ui.spinner();
-                        }
-                    });
+        egui::CentralPanel::default().show(ctx, |ui| {
+            // ---- 1) Repo address input (top of the single vertical column) ----
+            ui.horizontal(|ui| {
+                let btn_w = 90.0;
+                let w = (ui.available_width() - ui.spacing().item_spacing.x - btn_w).max(160.0);
+                bordered_edit(ui, &mut self.repo_input, w, &self.lang, "repo_input");
+                if ui.button(self.t("list_files")).clicked() {
+                    self.list_files_async();
+                }
+            });
+            ui.label(self.t("repo_placeholder"));
 
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        if ui.button(self.t("select_all")).clicked() {
-                            self.selected =
-                                self.file_entries.iter().map(|e| e.path.clone()).collect();
-                        }
-                        if ui.button(self.t("select_none")).clicked() {
-                            self.selected.clear();
-                        }
-                        ui.label(format!(
-                            "{}: {}/{}",
-                            self.t("file_list"),
-                            self.selected.len(),
-                            self.file_entries.len()
-                        ));
-                    });
-
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        for entry in &self.file_entries {
-                            let mut sel = self.selected.contains(&entry.path);
-                            if ui.checkbox(&mut sel, &entry.path).clicked() {
-                                if sel {
-                                    self.selected.insert(entry.path.clone());
-                                } else {
-                                    self.selected.remove(&entry.path);
-                                }
-                            }
-                        }
-                    });
-
-                    ui.separator();
-                    if let Some(info) = &self.repo_info {
-                        let target =
-                            crate::hf_api::target_dir_for(&info.repo_id, self.config.download_dir.trim());
-                        ui.label(format!("{}: {}", self.t("save_to"), target));
+            // ---- 2) Select all / none ----
+            ui.horizontal(|ui| {
+                if ui.button(self.t("select_all")).clicked() {
+                    for e in &self.file_entries {
+                        self.selected.insert(e.path.clone());
                     }
-                    ui.separator();
-                    if ui.button(self.t("start")).clicked() {
-                        self.start_download();
-                    }
-                    ui.label(self.status_text());
-                });
+                }
+                if ui.button(self.t("select_none")).clicked() {
+                    self.selected.clear();
+                }
             });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading(self.t("progress"));
-            if self.file_states.is_empty() {
+            // ---- 3) File list with merged progress (scrollable) ----
+            ui.separator();
+            ui.heading(self.t("file_list"));
+            if self.file_entries.is_empty() {
                 ui.label(self.t("no_files"));
             } else {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for (path, st) in self.file_states.iter() {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                    // Collect paths into a local so the loop doesn't hold a borrow of
+                    // `self` while the inner closures mutate `self` (selection / cancel).
+                    let entries: Vec<String> =
+                        self.file_entries.iter().map(|e| e.path.clone()).collect();
+                    for path in &entries {
+                        // Snapshot progress (if any) so nested UI closures that borrow
+                        // `self` mutably (cancel / retry) don't conflict with this read.
+                        let st = self.file_states.get(path).cloned();
                         ui.group(|ui| {
                             ui.horizontal(|ui| {
-                                ui.label(path);
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        let active = st.status == FileStatus::Downloading
-                                            || st.status == FileStatus::Pending;
-                                        if active {
-                                            if ui.button(self.t("cancel")).clicked() {
-                                                if let Some(tid) = &self.active_task_id {
-                                                    self.engine.cancel(tid);
-                                                }
-                                            }
-                                        } else if st.status == FileStatus::Failed
-                                            || st.status == FileStatus::Cancelled
-                                        {
-                                            if ui.button(self.t("retry")).clicked() {
-                                                if let Some(tid) = &self.active_task_id {
-                                                    let target_dir = self
-                                                        .repo_info
-                                                        .as_ref()
-                                                        .map(|i| {
-                                                            crate::hf_api::target_dir_for(
-                                                                &i.repo_id,
-                                                                self.config.download_dir.trim(),
-                                                            )
-                                                        })
-                                                        .unwrap_or_else(|| {
-                                                            self.config.download_dir.trim().to_string()
-                                                        });
-                                                    self.engine.retry(
-                                                        tid,
-                                                        path,
-                                                        self.config.endpoint.trim(),
-                                                        &target_dir,
-                                                        self.lang.clone(),
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        let (txt, color) = self.status_pair(st);
-                                        ui.colored_label(color, txt);
-                                        // Reserve a fixed width so the speed text changing
-                                        // length doesn't shift the status/buttons around.
-                                        ui.allocate_ui_with_layout(
-                                            egui::vec2(86.0, 18.0),
-                                            egui::Layout::left_to_right(egui::Align::Center),
-                                            |ui| {
-                                                ui.label(fmt_speed(st.speed));
-                                            },
-                                        );
-                                    },
-                                );
+                                let mut sel = self.selected.contains(path);
+                                if ui.checkbox(&mut sel, "").clicked() {
+                                    if sel {
+                                        self.selected.insert(path.clone());
+                                    } else {
+                                        self.selected.remove(path);
+                                    }
+                                }
+                                // Filename takes the full width and wraps when long, so
+                                // long names stay readable instead of being crammed.
+                                ui.add(egui::Label::new(path).wrap());
                             });
 
-                            let frac = if st.total > 0 {
-                                (st.downloaded as f32 / st.total as f32).clamp(0.0, 1.0)
-                            } else {
-                                0.0
-                            };
-                            let bar_text = format!(
-                                "{} / {}  ({:.1}%)",
-                                fmt_size(st.downloaded),
-                                fmt_size(st.total),
-                                frac * 100.0
-                            );
-                            ui.add(egui::ProgressBar::new(frac).text(bar_text));
-                            if let Some(err) = &st.error {
-                                ui.colored_label(egui::Color32::RED, err);
+                            if let Some(s) = &st {
+                                let frac = if s.total > 0 {
+                                    (s.downloaded as f32 / s.total as f32).clamp(0.0, 1.0)
+                                } else {
+                                    0.0
+                                };
+                                let bar_text = format!(
+                                    "{} / {}  ({:.1}%)",
+                                    fmt_size(s.downloaded),
+                                    fmt_size(s.total),
+                                    frac * 100.0
+                                );
+                                // Progress bar sits on its own line, directly under the
+                                // filename (so long filenames push it below, as requested).
+                                ui.add(egui::ProgressBar::new(frac).text(bar_text));
+
+                                let (txt, color) = self.status_pair(s);
+                                let speed_txt = fmt_speed(s.speed);
+                                let eta_txt = if s.status == FileStatus::Downloading
+                                    && s.speed > 0.0
+                                    && s.total > s.downloaded
+                                {
+                                    format!(
+                                        "{} {}",
+                                        self.t("eta"),
+                                        fmt_eta(s.total - s.downloaded, s.speed)
+                                    )
+                                } else {
+                                    String::new()
+                                };
+
+                                ui.horizontal(|ui| {
+                                    ui.colored_label(color, txt);
+                                    if !speed_txt.is_empty() {
+                                        ui.label(speed_txt);
+                                    }
+                                    if !eta_txt.is_empty() {
+                                        ui.label(eta_txt);
+                                    }
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            let active = s.status == FileStatus::Downloading
+                                                || s.status == FileStatus::Pending;
+                                            if active {
+                                                if ui.button(self.t("cancel")).clicked() {
+                                                    if let Some(tid) = &self.active_task_id {
+                                                        self.engine.cancel(tid);
+                                                    }
+                                                }
+                                            } else if s.status == FileStatus::Failed
+                                                || s.status == FileStatus::Cancelled
+                                            {
+                                                if ui.button(self.t("retry")).clicked() {
+                                                    if let Some(tid) = &self.active_task_id {
+                                                        let target_dir = self
+                                                            .repo_info
+                                                            .as_ref()
+                                                            .map(|i| {
+                                                                crate::hf_api::target_dir_for(
+                                                                    &i.repo_id,
+                                                                    self.config.download_dir.trim(),
+                                                                )
+                                                            })
+                                                            .unwrap_or_else(|| {
+                                                                self.config
+                                                                    .download_dir
+                                                                    .trim()
+                                                                    .to_string()
+                                                            });
+                                                        self.engine.retry(
+                                                            tid,
+                                                            path,
+                                                            self.config.endpoint.trim(),
+                                                            &target_dir,
+                                                            self.lang.clone(),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        },
+                                    );
+                                });
+
+                                if let Some(err) = &s.error {
+                                    ui.colored_label(egui::Color32::RED, err);
+                                }
                             }
                         });
                     }
                 });
+            }
+        });
+
+        // ---- 4) Save-to + Start-download bar (always visible while list scrolls) ----
+        egui::TopBottomPanel::bottom("bottom_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(self.t("save_to"));
+                let btn_list_w = 70.0 + ui.spacing().item_spacing.x + 110.0;
+                let w = (ui.available_width() - ui.spacing().item_spacing.x - btn_list_w)
+                    .max(160.0);
+                bordered_edit(ui, &mut self.config.download_dir, w, &self.lang, "bottom_download_dir");
+                if ui.button(self.t("browse")).clicked() {
+                    if let Some(f) = rfd::FileDialog::new().pick_folder() {
+                        self.config.download_dir = f.to_string_lossy().to_string();
+                        self.config.download_dir_set = true;
+                    }
+                }
+                if ui.button(self.t("start")).clicked() {
+                    self.start_download();
+                }
+            });
+            let status = self.status_text();
+            if !status.is_empty() {
+                ui.label(status);
             }
         });
 
@@ -501,7 +530,7 @@ impl eframe::App for App {
                     ui.label(self.t("download_dir"));
                     ui.horizontal(|ui| {
                         let w = ui.available_width().min(420.0);
-                        bordered_edit(ui, &mut self.config.download_dir, w);
+                        bordered_edit(ui, &mut self.config.download_dir, w, &self.lang, "settings_download_dir");
                         if ui.button(self.t("browse")).clicked() {
                             if let Some(f) = rfd::FileDialog::new().pick_folder() {
                                 self.config.download_dir = f.to_string_lossy().to_string();
@@ -511,7 +540,7 @@ impl eframe::App for App {
                     });
                     ui.label(self.t("endpoint"));
                     let w = ui.available_width().min(420.0);
-                    bordered_edit(ui, &mut self.config.endpoint, w);
+                    bordered_edit(ui, &mut self.config.endpoint, w, &self.lang, "settings_endpoint");
                     ui.separator();
                     ui.horizontal(|ui| {
                         if ui.button(self.t("save")).clicked() {
@@ -531,7 +560,7 @@ impl eframe::App for App {
             egui::Window::new(self.t("token_dialog_title"))
                 .show(ctx, |ui| {
                     ui.label(self.t("token_placeholder"));
-                    bordered_edit(ui, &mut self.token_input, f32::INFINITY);
+                    bordered_edit(ui, &mut self.token_input, f32::INFINITY, &self.lang, "token_input");
                     ui.horizontal(|ui| {
                         if ui.button(self.t("login")).clicked() {
                             self.login_async();
@@ -603,6 +632,23 @@ fn fmt_speed(bps: f64) -> String {
         return String::new();
     }
     format!("{}/s", fmt_size(bps as u64))
+}
+
+/// Estimated time to finish, derived from the average download speed:
+/// `remaining_bytes / speed`. Returns e.g. "1:23" or "1:02:03"; empty if unknown.
+fn fmt_eta(remaining: u64, speed: f64) -> String {
+    if speed <= 0.0 || remaining == 0 {
+        return String::new();
+    }
+    let secs = (remaining as f64 / speed).ceil() as u64;
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    if h > 0 {
+        format!("{}:{:02}:{:02}", h, m, s)
+    } else {
+        format!("{}:{:02}", m, s)
+    }
 }
 
 /// Default UI language: follow the OS UI language (zh* -> Chinese, anything else ->
@@ -697,20 +743,127 @@ fn font_candidates() -> Vec<std::path::PathBuf> {
 
 /// A single-line text box with a black border and white background so it stands
 /// out, regardless of the active theme. `desired_width` controls how wide it is
-/// (use `f32::INFINITY` to fill the available space).
-fn bordered_edit(ui: &mut egui::Ui, text: &mut String, desired_width: f32) {
+/// (use `f32::INFINITY` to fill the available space). `id_src` must be unique per
+/// field so the right-click menu can track the cursor; `lang` selects the menu
+/// language.
+fn bordered_edit(
+    ui: &mut egui::Ui,
+    text: &mut String,
+    desired_width: f32,
+    lang: &str,
+    id_src: &str,
+) {
+    let id = ui.make_persistent_id(id_src);
     egui::Frame::none()
         .stroke(egui::Stroke::new(1.5_f32, egui::Color32::BLACK))
         .fill(egui::Color32::WHITE)
         .inner_margin(egui::Margin::symmetric(6.0, 4.0))
         .show(ui, |ui| {
-            ui.add(
-                egui::TextEdit::singleline(text)
-                    .desired_width(desired_width)
-                    .frame(false)
-                    .text_color(egui::Color32::BLACK),
-            );
+            let out = egui::TextEdit::singleline(text)
+                .id(id)
+                .desired_width(desired_width)
+                .frame(false)
+                .text_color(egui::Color32::BLACK)
+                .show(ui);
+            edit_context_menu(ui, text, out.response, out.cursor_range, id, lang);
         });
+}
+
+/// Right-click menu (Cut / Copy / Paste / Select All) for a single-line text box.
+/// `text` is mutated in place for cut/paste; the caret is repositioned via the
+/// text-edit's stored `CCursorRange`.
+fn edit_context_menu(
+    _ui: &mut egui::Ui,
+    text: &mut String,
+    resp: egui::Response,
+    cursor_range: Option<egui::text::CursorRange>,
+    id: egui::Id,
+    lang: &str,
+) {
+    resp.context_menu(|ui| {
+        let (s, e) = cursor_char_range(text, cursor_range);
+        if ui.button(i18n::t("cut", lang)).clicked() {
+            if s < e {
+                let (bs, be) = (char_to_byte(text, s), char_to_byte(text, e));
+                let slice = text[bs..be].to_string();
+                ui.ctx().output_mut(|o| o.copied_text = slice);
+                text.replace_range(bs..be, "");
+                set_ccursor(ui.ctx(), id, s, s);
+            }
+            ui.close_menu();
+        }
+        if ui.button(i18n::t("copy", lang)).clicked() {
+            if s < e {
+                let slice: String = text.chars().skip(s).take(e - s).collect();
+                ui.ctx().output_mut(|o| o.copied_text = slice);
+            }
+            ui.close_menu();
+        }
+        if ui.button(i18n::t("paste", lang)).clicked() {
+            if let Ok(mut cb) = arboard::Clipboard::new() {
+                if let Ok(pasted) = cb.get_text() {
+                    let (bs, be) = (char_to_byte(text, s), char_to_byte(text, e));
+                    text.replace_range(bs..be, &pasted);
+                    let new_pos = s + pasted.chars().count();
+                    set_ccursor(ui.ctx(), id, new_pos, new_pos);
+                }
+            }
+            ui.close_menu();
+        }
+        if ui.button(i18n::t("select_all", lang)).clicked() {
+            let n = text.chars().count();
+            set_ccursor(ui.ctx(), id, 0, n);
+            ui.close_menu();
+        }
+    });
+}
+
+/// Char-index (start, end) of the current selection, clamped to text length.
+/// With no caret (e.g. never focused) we treat the whole buffer as selected so
+/// copy/cut act on everything and paste appends at the end.
+fn cursor_char_range(text: &str, cr: Option<egui::text::CursorRange>) -> (usize, usize) {
+    match cr {
+        Some(r) => {
+            let a = r.primary.ccursor.index;
+            let b = r.secondary.ccursor.index;
+            let (mut s, mut e) = if a <= b { (a, b) } else { (b, a) };
+            let n = text.chars().count();
+            s = s.min(n);
+            e = e.min(n);
+            (s, e)
+        }
+        None => {
+            let n = text.chars().count();
+            (n, n)
+        }
+    }
+}
+
+/// Map a char index to a byte index for `String` slicing.
+fn char_to_byte(text: &str, char_idx: usize) -> usize {
+    text.char_indices()
+        .nth(char_idx)
+        .map(|(b, _)| b)
+        .unwrap_or(text.len())
+}
+
+/// Reposition the text-edit caret by setting its stored `CCursorRange`.
+fn set_ccursor(ctx: &egui::Context, id: egui::Id, s: usize, e: usize) {
+    if let Some(mut state) = egui::TextEdit::load_state(ctx, id) {
+        let range = egui::text::CCursorRange {
+            primary: egui::text::CCursor {
+                index: s,
+                prefer_next_row: true,
+            },
+            secondary: egui::text::CCursor {
+                index: e,
+                prefer_next_row: true,
+            },
+        };
+        state.cursor.set_char_range(Some(range));
+        state.store(ctx, id);
+        ctx.request_repaint();
+    }
 }
 
 fn main() -> eframe::Result<()> {
