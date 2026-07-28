@@ -299,6 +299,13 @@ impl eframe::App for App {
             }
             ui.horizontal(|ui| {
                 ui.heading(self.t("title"));
+                ui.add_space(8.0);
+                // Repo-input hint lives next to the title as a quiet subtitle rather
+                // than crowding the input area below.
+                ui.label(
+                    egui::RichText::new(self.t("repo_placeholder"))
+                        .weak(),
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button(self.t("settings")).clicked() {
                         self.show_settings = true;
@@ -359,9 +366,15 @@ impl eframe::App for App {
                     self.list_files_async();
                 }
             });
-            ui.label(self.t("repo_placeholder"));
+            // Listing status goes on its own line directly under the List Files
+            // button (and above the placeholder hint) so it's clearly feedback for
+            // that action and stays fully visible.
+            let status = self.status_text();
+            if !status.is_empty() {
+                ui.label(status);
+            }
 
-            // ---- 2) Select all / none ----
+            // ---- 2) Select all / none + start download ----
             ui.horizontal(|ui| {
                 if ui.button(self.t("select_all")).clicked() {
                     for e in &self.file_entries {
@@ -370,6 +383,11 @@ impl eframe::App for App {
                 }
                 if ui.button(self.t("select_none")).clicked() {
                     self.selected.clear();
+                }
+                // A little gap before the Start button so the group reads clearly.
+                ui.add_space(12.0);
+                if ui.button(self.t("start")).clicked() {
+                    self.start_download();
                 }
             });
 
@@ -386,23 +404,54 @@ impl eframe::App for App {
                     // `self` while the inner closures mutate `self` (selection / cancel).
                     let entries: Vec<String> =
                         self.file_entries.iter().map(|e| e.path.clone()).collect();
+                    // Snapshot file sizes so the row can show "大小: X" without
+                    // borrowing `self` while the inner closures mutate it.
+                    let sizes: std::collections::HashMap<String, u64> = self
+                        .file_entries
+                        .iter()
+                        .map(|e| (e.path.clone(), e.size))
+                        .collect();
                     for path in &entries {
                         // Snapshot progress (if any) so nested UI closures that borrow
                         // `self` mutably (cancel / retry) don't conflict with this read.
                         let st = self.file_states.get(path).cloned();
                         ui.group(|ui| {
-                            ui.horizontal(|ui| {
-                                let mut sel = self.selected.contains(path);
-                                if ui.checkbox(&mut sel, "").clicked() {
-                                    if sel {
-                                        self.selected.insert(path.clone());
-                                    } else {
-                                        self.selected.remove(path);
+                            // Two-column row via egui's `columns`: column 0 holds the
+                            // checkbox + filename (filename wraps within the column),
+                            // column 1 holds the size, right-aligned.
+                            ui.columns(2, |cols| {
+                                let (left, right) = cols.split_at_mut(1);
+                                let name_col = &mut left[0];
+                                let size_col = &mut right[0];
+                                name_col.horizontal(|ui| {
+                                    let mut sel = self.selected.contains(path);
+                                    let cb = ui.checkbox(&mut sel, "");
+                                    if cb.clicked() {
+                                        if sel {
+                                            self.selected.insert(path.clone());
+                                        } else {
+                                            self.selected.remove(path);
+                                        }
                                     }
-                                }
-                                // Filename takes the full width and wraps when long, so
-                                // long names stay readable instead of being crammed.
-                                ui.add(egui::Label::new(path).wrap());
+                                    ui.add(egui::Label::new(path).wrap());
+                                });
+                                // Wrap in `.horizontal` so the column only takes one line
+                                // of height — a bare `with_layout` would allocate the full
+                                // (large) column height and leave blank space below.
+                                size_col.horizontal(|ui| {
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if let Some(&sz) = sizes.get(path) {
+                                                ui.label(format!(
+                                                    "{}: {}",
+                                                    self.t("size"),
+                                                    fmt_size(sz)
+                                                ));
+                                            }
+                                        },
+                                    );
+                                });
                             });
 
                             if let Some(s) = &st {
@@ -499,11 +548,18 @@ impl eframe::App for App {
             }
         });
 
-        // ---- 4) Save-to + Start-download bar (always visible while list scrolls) ----
+        // ---- 4) Save-to bar (always visible while list scrolls) ----
         egui::TopBottomPanel::bottom("bottom_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label(self.t("save_to"));
-                let btn_list_w = 70.0 + ui.spacing().item_spacing.x + 110.0;
+                // Center-aligned row keeps the "浏览" button coordinated with the
+                // directory input box. Nudge the "保存到" label down a touch (via a
+                // small top spacer) so it reads a little lower than dead-center,
+                // which looks better next to the taller input box.
+                ui.vertical(|ui| {
+                    ui.add_space(6.0);
+                    ui.label(self.t("save_to"));
+                });
+                let btn_list_w = 70.0 + ui.spacing().item_spacing.x;
                 let w = (ui.available_width() - ui.spacing().item_spacing.x - btn_list_w)
                     .max(160.0);
                 bordered_edit(ui, &mut self.config.download_dir, w, &self.lang, "bottom_download_dir");
@@ -513,14 +569,7 @@ impl eframe::App for App {
                         self.config.download_dir_set = true;
                     }
                 }
-                if ui.button(self.t("start")).clicked() {
-                    self.start_download();
-                }
             });
-            let status = self.status_text();
-            if !status.is_empty() {
-                ui.label(status);
-            }
         });
 
         if self.show_settings {
