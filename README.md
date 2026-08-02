@@ -81,7 +81,7 @@ cargo build --release
 
 ## 关于 / About
 
-- **版本 / Version**：`0.2.4`（见 `Cargo.toml`，运行时从 `CARGO_PKG_VERSION` 读取）
+- **版本 / Version**：`0.2.5`（见 `Cargo.toml`，运行时从 `CARGO_PKG_VERSION` 读取）
 - **作者 / Author**：lordquest@163.com
 
 顶栏右键菜单或「关于」按钮可随时查看。

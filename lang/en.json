@@ -17,7 +17,7 @@
   "err_empty": "Enter a repo address",
   "error": "Error",
   "file_list": "File List",
-  "download_dir": "Download directory",
+  "download_dir": "Default download directory",
   "endpoint": "Mirror/Endpoint (optional)",
   "language": "Language",
   "browse": "Browse",

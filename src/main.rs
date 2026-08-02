@@ -501,7 +501,7 @@ impl eframe::App for App {
                                             if active {
                                                 if ui.button(self.t("cancel")).clicked() {
                                                     if let Some(tid) = &self.active_task_id {
-                                                        self.engine.cancel(tid);
+                                                        self.engine.pause_file(tid, path);
                                                     }
                                                 }
                                             } else if s.status == FileStatus::Failed
@@ -548,27 +548,23 @@ impl eframe::App for App {
             }
         });
 
-        // ---- 4) Save-to bar (always visible while list scrolls) ----
+        // ---- 4) Actual save-to path (read-only label) ----
+        // The default base directory is chosen in Settings; the real target folder
+        // is base + repo_id (e.g. .../cyankiwi-Qwen3.6-27B-AWQ-BF16-INT4). We show
+        // that resolved path here as a plain red label — conspicuous and not editable.
         egui::TopBottomPanel::bottom("bottom_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                // Center-aligned row keeps the "浏览" button coordinated with the
-                // directory input box. Nudge the "保存到" label down a touch (via a
-                // small top spacer) so it reads a little lower than dead-center,
-                // which looks better next to the taller input box.
-                ui.vertical(|ui| {
-                    ui.add_space(6.0);
-                    ui.label(self.t("save_to"));
-                });
-                let btn_list_w = 70.0 + ui.spacing().item_spacing.x;
-                let w = (ui.available_width() - ui.spacing().item_spacing.x - btn_list_w)
-                    .max(160.0);
-                bordered_edit(ui, &mut self.config.download_dir, w, &self.lang, "bottom_download_dir");
-                if ui.button(self.t("browse")).clicked() {
-                    if let Some(f) = rfd::FileDialog::new().pick_folder() {
-                        self.config.download_dir = f.to_string_lossy().to_string();
-                        self.config.download_dir_set = true;
-                    }
-                }
+                ui.label(self.t("save_to"));
+                let target_dir = self
+                    .repo_info
+                    .as_ref()
+                    .map(|info| {
+                        crate::hf_api::target_dir_for(&info.repo_id, self.config.download_dir.trim())
+                    })
+                    .unwrap_or_else(|| self.config.download_dir.trim().to_string());
+                ui.label(
+                    egui::RichText::new(target_dir).color(egui::Color32::RED),
+                );
             });
         });
 

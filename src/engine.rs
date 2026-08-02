@@ -1,6 +1,6 @@
 use std::sync::mpsc::Sender;
 
-use crate::download::{self, TaskManager};
+use crate::download::{self, FileStatus, TaskManager};
 use crate::hf_api::{FileEntry, RepoInfo, TokenStatus};
 
 /// Messages sent from the download/worker threads back to the egui UI thread.
@@ -71,6 +71,9 @@ impl DownloadEngine {
     }
 
     /// Cancel the whole task (all in-flight files will stop at the next checkpoint).
+    /// Kept as the "pause all" operation; the UI currently pauses per-file via
+    /// `pause_file`, so this is unused for now.
+    #[allow(dead_code)]
     pub fn cancel(&self, task_id: &str) {
         download::download_runtime().block_on(async {
             let tasks = self.manager.tasks.lock().await;
@@ -79,6 +82,22 @@ impl DownloadEngine {
                     .await
                     .cancelled
                     .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+    }
+
+    /// Pause a single file. The running download for that file stops at the next
+    /// checkpoint (the partial file stays on disk so it can be resumed later), while
+    /// every other file in the task keeps downloading. This is the per-file equivalent
+    /// of `cancel`, which stops the entire task.
+    pub fn pause_file(&self, task_id: &str, file_path: &str) {
+        download::download_runtime().block_on(async {
+            let tasks = self.manager.tasks.lock().await;
+            if let Some(task) = tasks.get(task_id) {
+                let mut t = task.lock().await;
+                if let Some(f) = t.files.get_mut(file_path) {
+                    f.status = FileStatus::Cancelled;
+                }
             }
         });
     }

@@ -79,7 +79,7 @@ No recompile needed.
 
 ## About
 
-- **Version**: `0.2.4` (from `Cargo.toml`, read at runtime via `CARGO_PKG_VERSION`)
+- **Version**: `0.2.5` (from `Cargo.toml`, read at runtime via `CARGO_PKG_VERSION`)
 - **Author**: lordquest@163.com
 
 Accessible any time from the top-bar right-click menu or the "About" button.

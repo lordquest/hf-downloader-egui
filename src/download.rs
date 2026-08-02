@@ -163,47 +163,56 @@ pub async fn start_downloads(
 ) {
     let sem = Arc::new(Semaphore::new(3)); // max 3 concurrent downloads
 
+    let mut started_any = false;
     for (path, size) in file_paths {
-        // Register file in task
-        {
-            let mut t = task.lock().await;
-            if let Some(existing) = t.files.get(&path) {
-                match existing.status {
-                    FileStatus::Failed | FileStatus::Cancelled => {
-                        t.files.insert(
-                            path.clone(),
-                            FileState {
-                                path: path.clone(),
-                                status: FileStatus::Pending,
-                                downloaded: 0,
-                                total: size,
-                                speed: 0.0,
-                                error: None,
-                            },
-                        );
+        // Decide whether this file still needs downloading. Already-"done" files are
+        // re-verified against disk, because a file can be deleted/truncated after a
+        // prior successful run while the in-memory task still reports Done. Files that
+        // are Downloading/Pending already have a live worker, so they must not be
+        // spawned a second time.
+        let needs_download = {
+            let t = task.lock().await;
+            match t.files.get(&path) {
+                Some(existing) => match existing.status {
+                    FileStatus::Failed | FileStatus::Cancelled => true,
+                    FileStatus::Done | FileStatus::Exists => {
+                        let local = std::path::Path::new(&t.target_dir).join(&path);
+                        let on_disk = if local.exists() {
+                            std::fs::metadata(&local).map(|m| m.len()).unwrap_or(0)
+                        } else {
+                            0
+                        };
+                        // Re-download only if the on-disk file is missing or too small.
+                        !(on_disk >= existing.total && existing.total > 0)
                     }
-                    FileStatus::Done | FileStatus::Exists | FileStatus::Downloading => {
-                        continue;
-                    }
-                    FileStatus::Pending => {
-                        continue;
-                    }
-                }
-            } else {
-                t.files.insert(
-                    path.clone(),
-                    FileState {
-                        path: path.clone(),
-                        status: FileStatus::Pending,
-                        downloaded: 0,
-                        total: size,
-                        speed: 0.0,
-                        error: None,
-                    },
-                );
+                    FileStatus::Downloading | FileStatus::Pending => false,
+                },
+                None => true,
             }
+        };
+
+        if needs_download {
+            let mut t = task.lock().await;
+            t.files.insert(
+                path.clone(),
+                FileState {
+                    path: path.clone(),
+                    status: FileStatus::Pending,
+                    downloaded: 0,
+                    total: size,
+                    speed: 0.0,
+                    error: None,
+                },
+            );
+            drop(t);
+        } else {
+            // Already complete on disk (or a live worker is handling it): report the
+            // real status so the UI doesn't keep the misleading 0% / "starting…".
+            send_file(&tx, &task, &path).await;
+            continue;
         }
 
+        started_any = true;
         let sem = sem.clone();
         let task = task.clone();
         let tx = tx.clone();
@@ -213,7 +222,29 @@ pub async fn start_downloads(
         let lang = lang.clone();
         download_runtime().spawn(async move {
             let _permit = sem.acquire().await;
+            // If this file was paused (via `pause_file`) while it was still queued
+            // behind the concurrency semaphore, don't flip it back to Downloading —
+            // leave it Cancelled so the per-file pause actually takes effect.
+            {
+                let t = task.lock().await;
+                if t.files
+                    .get(&file_path)
+                    .map(|f| f.status == FileStatus::Cancelled)
+                    .unwrap_or(false)
+                {
+                    return;
+                }
+            }
             download_file(task, tx, &tid, &file_path, lang).await;
+        });
+    }
+
+    // If nothing actually needed downloading (everything was already complete on
+    // disk), no worker will emit `Done`, so tell the UI directly — otherwise it
+    // would be stuck showing "正在开始下载…".
+    if !started_any {
+        let _ = tx.send(UiMsg::Done {
+            task_id: task_id.clone(),
         });
     }
 }
