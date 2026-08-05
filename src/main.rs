@@ -356,6 +356,25 @@ impl eframe::App for App {
             });
         });
 
+        // ---- Bottom save-to bar ----
+        // Shown BEFORE the CentralPanel so the central content reserves space for it
+        // and the last file row in the list isn't obscured by the bottom panel.
+        egui::TopBottomPanel::bottom("bottom_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(self.t("save_to"));
+                let target_dir = self
+                    .repo_info
+                    .as_ref()
+                    .map(|info| {
+                        crate::hf_api::target_dir_for(&info.repo_id, self.config.download_dir.trim())
+                    })
+                    .unwrap_or_else(|| self.config.download_dir.trim().to_string());
+                ui.label(
+                    egui::RichText::new(target_dir).color(egui::Color32::RED),
+                );
+            });
+        });
+
         egui::CentralPanel::default().show(ctx, |ui| {
             // ---- 1) Repo address input (top of the single vertical column) ----
             ui.horizontal(|ui| {
@@ -546,26 +565,6 @@ impl eframe::App for App {
                     }
                 });
             }
-        });
-
-        // ---- 4) Actual save-to path (read-only label) ----
-        // The default base directory is chosen in Settings; the real target folder
-        // is base + repo_id (e.g. .../cyankiwi-Qwen3.6-27B-AWQ-BF16-INT4). We show
-        // that resolved path here as a plain red label — conspicuous and not editable.
-        egui::TopBottomPanel::bottom("bottom_bar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(self.t("save_to"));
-                let target_dir = self
-                    .repo_info
-                    .as_ref()
-                    .map(|info| {
-                        crate::hf_api::target_dir_for(&info.repo_id, self.config.download_dir.trim())
-                    })
-                    .unwrap_or_else(|| self.config.download_dir.trim().to_string());
-                ui.label(
-                    egui::RichText::new(target_dir).color(egui::Color32::RED),
-                );
-            });
         });
 
         if self.show_settings {

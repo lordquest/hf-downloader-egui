@@ -2,6 +2,13 @@
 
 All notable changes to HF Model Downloader (egui) are documented here.
 
+## v0.2.6 (2026-07-29)
+
+UI 布局修复。
+
+### Fixed
+- **文件列表最底行被遮挡**：底部「保存到」栏原在 `CentralPanel` 之后显示，导致主内容区未为其预留空间、底部栏盖住文件列表最后一行。已将底部栏改在 `CentralPanel` 之前显示，文件列表区域整体下移，最后一行可完整显示且滚动到底不再被遮。
+
 ## v0.2.5 (2026-07-29)
 
 UI 与下载行为修正。
