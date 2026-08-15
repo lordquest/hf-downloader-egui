@@ -5,6 +5,7 @@ mod download;
 mod engine;
 mod hf_api;
 mod i18n;
+mod session;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::Receiver;
@@ -15,6 +16,7 @@ use crate::config::AppConfig;
 use crate::download::{FileState, FileStatus};
 use crate::engine::{DownloadEngine, UiMsg};
 use crate::hf_api::{FileEntry, RepoInfo, TokenStatus};
+use crate::session::Session;
 
 struct App {
     rx: Receiver<UiMsg>,
@@ -39,6 +41,15 @@ struct App {
     show_about: bool,
     about_menu_pos: Option<egui::Pos2>,
     busy: bool,
+
+    // --- Download session persistence / recovery ---
+    /// Snapshot of the currently running download (written to disk so it can be
+    /// resumed after a restart). `None` when no download is active.
+    current_session: Option<Session>,
+    /// Sessions found at startup that can be resumed (after a restart).
+    recovery_sessions: Vec<Session>,
+    /// Whether the recovery chooser window is open (only when multiple sessions exist).
+    show_recovery: bool,
 }
 
 /// Status line is stored as a (possibly parameterized) translation key so it can be
@@ -81,9 +92,72 @@ impl App {
             show_about: false,
             about_menu_pos: None,
             busy: false,
+            current_session: None,
+            recovery_sessions: Vec::new(),
+            show_recovery: false,
         };
         app.check_token_async();
+        app.init_recovery();
         app
+    }
+
+    /// On startup, look for download sessions left by previous runs. If there's
+    /// exactly one, resume it directly; if there are several, open a chooser so the
+    /// user can pick which repo to resume.
+    fn init_recovery(&mut self) {
+        let sessions = session::list_recoverable_sessions();
+        if sessions.is_empty() {
+            return;
+        }
+        if sessions.len() == 1 {
+            self.restore_session(&sessions[0], true);
+        } else {
+            self.recovery_sessions = sessions;
+            self.show_recovery = true;
+        }
+    }
+
+    /// Restore app state from a saved session and (optionally) start downloading.
+    /// The source session file is deleted so it doesn't linger / get re-offered.
+    fn restore_session(&mut self, s: &Session, auto_start: bool) {
+        self.config.download_dir = s.download_dir.clone();
+        self.config.endpoint = s.endpoint.clone();
+        self.repo_info = Some(RepoInfo {
+            repo_id: s.repo_id.clone(),
+            repo_type: s.repo_type.clone(),
+            revision: s.revision.clone(),
+            subpath: s.subpath.clone(),
+        });
+        self.file_entries = s
+            .files
+            .iter()
+            .map(|f| FileEntry {
+                path: f.path.clone(),
+                size: f.size,
+            })
+            .collect();
+        self.selected = s.files.iter().map(|f| f.path.clone()).collect();
+        self.file_states.clear();
+        for f in &s.files {
+            self.file_states.insert(
+                f.path.clone(),
+                FileState {
+                    path: f.path.clone(),
+                    status: FileStatus::Pending,
+                    downloaded: 0,
+                    total: f.size,
+                    speed: 0.0,
+                    error: None,
+                },
+            );
+        }
+        self.active_task_id = Some(format!("task-{}", s.repo_id));
+        // Remove the old PID's session file now that we're taking it over.
+        session::delete_session_file(&session::path_for_pid(s.pid));
+        self.status = StatusMsg::Tr("recovered");
+        if auto_start {
+            self.start_download();
+        }
     }
 
     fn t(&self, key: &str) -> String {
@@ -200,6 +274,33 @@ impl App {
             .map(|e| (e.path.clone(), e.size))
             .collect();
 
+        // Persist this download as a session so it can be resumed after a restart.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let session = Session {
+            session_id: format!("session-{}", std::process::id()),
+            pid: std::process::id(),
+            repo_id: info.repo_id.clone(),
+            repo_type: info.repo_type.clone(),
+            revision: info.revision.clone(),
+            subpath: info.subpath.clone(),
+            endpoint: self.config.endpoint.trim().to_string(),
+            download_dir: self.config.download_dir.trim().to_string(),
+            target_dir: target_dir.clone(),
+            files: file_paths
+                .iter()
+                .map(|(p, s)| session::SessionFileEntry {
+                    path: p.clone(),
+                    size: *s,
+                })
+                .collect(),
+            updated_at: now,
+        };
+        session::write_session(&session);
+        self.current_session = Some(session);
+
         // Pre-populate the progress map so the UI shows rows immediately.
         self.file_states.clear();
         for (p, s) in &file_paths {
@@ -238,6 +339,10 @@ impl App {
                 }
                 UiMsg::Done { task_id } => {
                     if self.active_task_id.as_deref() == Some(&task_id) {
+                        // Whole task finished — nothing left to resume, so drop the
+                        // session file.
+                        session::delete_current_session();
+                        self.current_session = None;
                         self.status = StatusMsg::Tr("done");
                     }
                 }
@@ -651,6 +756,45 @@ impl eframe::App for App {
                     self.about_menu_pos = None;
                 }
             }
+        }
+
+        // Recovery chooser: shown at startup when more than one previous download
+        // session was found, so the user can pick which repo to resume.
+        if self.show_recovery {
+            let sessions = self.recovery_sessions.clone();
+            egui::Window::new(self.t("recovery_title"))
+                .collapsible(false)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    ui.label(self.t("recovery_prompt"));
+                    egui::ScrollArea::vertical()
+                        .max_height(320.0)
+                        .show(ui, |ui| {
+                            for s in &sessions {
+                                ui.group(|ui| {
+                                    ui.heading(&s.repo_id);
+                                    ui.label(format!(
+                                        "{}: {} · {}: {}",
+                                        self.t("files"),
+                                        s.files.len(),
+                                        self.t("saved_at"),
+                                        s.updated_at
+                                    ));
+                                    if ui.button(self.t("resume")).clicked() {
+                                        self.restore_session(s, true);
+                                        self.show_recovery = false;
+                                        self.recovery_sessions.clear();
+                                    }
+                                });
+                            }
+                        });
+                    ui.horizontal(|ui| {
+                        if ui.button(self.t("recovery_cancel")).clicked() {
+                            self.show_recovery = false;
+                            self.recovery_sessions.clear();
+                        }
+                    });
+                });
         }
     }
 }
