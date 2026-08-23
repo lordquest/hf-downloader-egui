@@ -7,6 +7,7 @@
   "select_all": "Select All",
   "select_none": "Select None",
   "start": "Start Download",
+  "pause_all": "Pause All",
   "files": "files",
   "listed": "Listed",
   "listing": "Fetching file list...",

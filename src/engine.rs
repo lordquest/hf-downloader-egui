@@ -102,6 +102,22 @@ impl DownloadEngine {
         });
     }
 
+    /// Pause every file in the task that is still in-flight or queued. Each file stops
+    /// independently at its next checkpoint; this is the bulk equivalent of `pause_file`.
+    pub fn pause_all(&self, task_id: &str) {
+        download::download_runtime().block_on(async {
+            let tasks = self.manager.tasks.lock().await;
+            if let Some(task) = tasks.get(task_id) {
+                let mut t = task.lock().await;
+                for f in t.files.values_mut() {
+                    if f.status == FileStatus::Downloading || f.status == FileStatus::Pending {
+                        f.status = FileStatus::Cancelled;
+                    }
+                }
+            }
+        });
+    }
+
     /// Test-only accessor to the engine's task registry (so tests can pre-seed a task
     /// without going through `start`). Not used by the app.
     #[cfg(test)]

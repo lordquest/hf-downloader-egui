@@ -513,6 +513,12 @@ impl eframe::App for App {
                 if ui.button(self.t("start")).clicked() {
                     self.start_download();
                 }
+                ui.add_space(8.0);
+                if ui.button(self.t("pause_all")).clicked() {
+                    if let Some(tid) = &self.active_task_id {
+                        self.engine.pause_all(tid);
+                    }
+                }
             });
 
             // ---- 3) File list with merged progress (scrollable) ----
