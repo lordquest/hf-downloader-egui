@@ -353,6 +353,12 @@ impl App {
                     // download. The "Select All" button is still there if they want
                     // everything.
                     self.selected.clear();
+                    // Clear any progress rows left over from a previously completed or
+                    // abandoned download so they don't get mixed in with the freshly
+                    // listed repo (e.g. an overlapping filename would otherwise show a
+                    // stale 100% bar).
+                    self.file_states.clear();
+                    self.active_task_id = None;
                     self.busy = false;
                     self.status =
                         StatusMsg::TrCount("listed", self.file_entries.len(), "files");
@@ -378,6 +384,42 @@ impl App {
             FileStatus::Exists => (self.t("exists"), egui::Color32::GREEN),
             FileStatus::Failed => (self.t("failed"), egui::Color32::RED),
             FileStatus::Cancelled => (self.t("cancelled"), egui::Color32::YELLOW),
+        }
+    }
+
+    /// Summary text shown next to the "Pause All" button:
+    /// - `None` when there is nothing to show (no download at all, or the task is
+    ///   paused/queued with nothing in flight),
+    /// - `Some("总速度: X")` while files are actively downloading (sum of their speeds),
+    /// - `Some("已全部完成")` once every file in the task has finished.
+    fn download_summary(&self) -> Option<String> {
+        if self.file_states.is_empty() {
+            return None;
+        }
+        let mut total_speed = 0.0_f64;
+        let mut downloading = 0_usize;
+        let mut all_done = true;
+        for f in self.file_states.values() {
+            match f.status {
+                FileStatus::Downloading => {
+                    downloading += 1;
+                    total_speed += f.speed;
+                    all_done = false;
+                }
+                // Anything still pending or stopped short of completion means the
+                // task isn't fully done yet.
+                FileStatus::Pending
+                | FileStatus::Failed
+                | FileStatus::Cancelled => all_done = false,
+                FileStatus::Done | FileStatus::Exists => {}
+            }
+        }
+        if downloading > 0 {
+            Some(format!("{}: {}", self.t("total_speed"), fmt_speed(total_speed)))
+        } else if all_done {
+            Some(self.t("all_done"))
+        } else {
+            None
         }
     }
 }
@@ -518,6 +560,12 @@ impl eframe::App for App {
                     if let Some(tid) = &self.active_task_id {
                         self.engine.pause_all(tid);
                     }
+                }
+                // Live summary to the right of Pause All: total speed while downloading,
+                // "已全部完成" once everything is done, hidden otherwise.
+                if let Some(summary) = self.download_summary() {
+                    ui.add_space(12.0);
+                    ui.label(egui::RichText::new(summary).weak());
                 }
             });
 

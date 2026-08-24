@@ -8,6 +8,8 @@
   "select_none": "全不选",
   "start": "开始下载",
   "pause_all": "全部暂停",
+  "total_speed": "总速度",
+  "all_done": "已全部完成",
   "files": "个文件",
   "listed": "已列出",
   "listing": "正在获取文件列表...",

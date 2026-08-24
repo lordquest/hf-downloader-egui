@@ -8,6 +8,8 @@
   "select_none": "Select None",
   "start": "Start Download",
   "pause_all": "Pause All",
+  "total_speed": "Total speed",
+  "all_done": "All completed",
   "files": "files",
   "listed": "Listed",
   "listing": "Fetching file list...",
