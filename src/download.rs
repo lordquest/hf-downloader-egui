@@ -164,17 +164,23 @@ pub async fn start_downloads(
     let sem = Arc::new(Semaphore::new(3)); // max 3 concurrent downloads
 
     let mut started_any = false;
+    // True while at least one file still has a live worker (queued behind the
+    // semaphore or in flight). Needed below so a redundant "Start Download" press on
+    // an in-progress task isn't mistaken for "nothing left to do" — with hundreds of
+    // queued files that would report the download (and delete its resume session)
+    // while it is still running.
+    let mut any_active = false;
     for (path, size) in file_paths {
         // Decide whether this file still needs downloading. Already-"done" files are
         // re-verified against disk, because a file can be deleted/truncated after a
         // prior successful run while the in-memory task still reports Done. Files that
         // are Downloading/Pending already have a live worker, so they must not be
         // spawned a second time.
-        let needs_download = {
+        let (needs_download, has_worker) = {
             let t = task.lock().await;
             match t.files.get(&path) {
                 Some(existing) => match existing.status {
-                    FileStatus::Failed | FileStatus::Cancelled => true,
+                    FileStatus::Failed | FileStatus::Cancelled => (true, false),
                     FileStatus::Done | FileStatus::Exists => {
                         let local = std::path::Path::new(&t.target_dir).join(&path);
                         let on_disk = if local.exists() {
@@ -183,13 +189,14 @@ pub async fn start_downloads(
                             0
                         };
                         // Re-download only if the on-disk file is missing or too small.
-                        !(on_disk >= existing.total && existing.total > 0)
+                        (!(on_disk >= existing.total && existing.total > 0), false)
                     }
-                    FileStatus::Downloading | FileStatus::Pending => false,
+                    FileStatus::Downloading | FileStatus::Pending => (false, true),
                 },
-                None => true,
+                None => (true, false),
             }
         };
+        any_active |= has_worker;
 
         if needs_download {
             let mut t = task.lock().await;
@@ -242,7 +249,12 @@ pub async fn start_downloads(
     // If nothing actually needed downloading (everything was already complete on
     // disk), no worker will emit `Done`, so tell the UI directly — otherwise it
     // would be stuck showing "正在开始下载…".
-    if !started_any {
+    //
+    // Guard: only when NO file has a live worker. Files that are merely Pending are
+    // queued behind the concurrency semaphore and will emit progress shortly, so
+    // reporting Done here would falsely mark an in-progress download as finished
+    // (and the UI handler would delete its resume session).
+    if !started_any && !any_active {
         let _ = tx.send(UiMsg::Done {
             task_id: task_id.clone(),
         });
@@ -976,6 +988,107 @@ mod tests {
         let ep = rt.block_on(async { task.lock().await.endpoint.clone() });
         assert_eq!(ep, new_endpoint, "retry must apply the new endpoint");
         assert_eq!(std::fs::read(&out).unwrap(), *blob);
+        let _ = std::fs::remove_file(&out);
+    }
+
+    /// Regression: pressing "Start Download" while a task is already running must not
+    /// report completion. Files queued behind the semaphore are `Pending` and get
+    /// skipped here, so with hundreds of them the old code concluded "nothing started"
+    /// and emitted `Done` — falsely finishing (and deleting the resume session of) a
+    /// download that was still in progress.
+    #[test]
+    fn start_on_in_progress_task_does_not_report_done() {
+        let dir = std::env::temp_dir().join(format!("hf_test_active_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let task = Arc::new(Mutex::new({
+            let mut t = DownloadTask::new(
+                "repo".into(),
+                "model".into(),
+                "main".into(),
+                dir.to_string_lossy().to_string(),
+                "http://127.0.0.1:1".into(), // unreachable; nothing must be downloaded
+            );
+            t.files.insert(
+                "file.bin".into(),
+                FileState {
+                    path: "file.bin".into(),
+                    status: FileStatus::Pending,
+                    downloaded: 0,
+                    total: 1000,
+                    speed: 0.0,
+                    error: None,
+                },
+            );
+            t
+        }));
+        let (tx, rx) = mpsc::channel::<UiMsg>();
+        download_runtime().block_on(start_downloads(
+            "task-test".into(),
+            task,
+            vec![("file.bin".into(), 1000)],
+            tx,
+            "en".into(),
+        ));
+        let mut got_done = false;
+        while let Ok(msg) = rx.try_recv() {
+            if let UiMsg::Done { .. } = msg {
+                got_done = true;
+            }
+        }
+        assert!(
+            !got_done,
+            "must not report Done while files still have live workers"
+        );
+    }
+
+    /// The flip side: when every selected file is already complete on disk nothing is
+    /// spawned, so `Done` must still be emitted or the UI would hang on "starting…".
+    #[test]
+    fn start_when_all_files_complete_on_disk_reports_done() {
+        let blob: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
+        let dir = std::env::temp_dir().join(format!("hf_test_alldone_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let out = dir.join("file.bin");
+        std::fs::write(&out, &blob).unwrap();
+        let task = Arc::new(Mutex::new({
+            let mut t = DownloadTask::new(
+                "repo".into(),
+                "model".into(),
+                "main".into(),
+                dir.to_string_lossy().to_string(),
+                "http://127.0.0.1:1".into(),
+            );
+            t.files.insert(
+                "file.bin".into(),
+                FileState {
+                    path: "file.bin".into(),
+                    status: FileStatus::Exists,
+                    downloaded: blob.len() as u64,
+                    total: blob.len() as u64,
+                    speed: 0.0,
+                    error: None,
+                },
+            );
+            t
+        }));
+        let (tx, rx) = mpsc::channel::<UiMsg>();
+        download_runtime().block_on(start_downloads(
+            "task-test".into(),
+            task,
+            vec![("file.bin".into(), blob.len() as u64)],
+            tx,
+            "en".into(),
+        ));
+        let mut got_done = false;
+        while let Ok(msg) = rx.try_recv() {
+            if let UiMsg::Done { .. } = msg {
+                got_done = true;
+            }
+        }
+        assert!(
+            got_done,
+            "Done must still be reported when every file is already complete"
+        );
         let _ = std::fs::remove_file(&out);
     }
 }
