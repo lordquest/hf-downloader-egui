@@ -462,6 +462,26 @@ impl App {
         );
         Some((frac, text))
     }
+
+    /// Estimated time until every file of the download has finished, from the bytes
+    /// still missing across all files and the summed transfer speed. `None` while
+    /// nothing is actually moving (paused, or already finished).
+    fn total_eta(&self) -> Option<String> {
+        let mut downloaded = 0u64;
+        let mut total = 0u64;
+        let mut speed = 0.0_f64;
+        for f in self.file_states.values() {
+            downloaded += f.downloaded;
+            total += f.total;
+            if f.status == FileStatus::Downloading {
+                speed += f.speed;
+            }
+        }
+        if speed <= 0.0 || total <= downloaded {
+            return None;
+        }
+        Some(fmt_eta(total - downloaded, speed))
+    }
 }
 
 impl eframe::App for App {
@@ -617,6 +637,11 @@ impl eframe::App for App {
                             .text(text)
                             .desired_width(w),
                     );
+                }
+                // Estimated time for the whole batch to finish.
+                if let Some(eta) = self.total_eta() {
+                    ui.add_space(12.0);
+                    ui.label(format!("{} {}", self.t("eta"), eta));
                 }
             });
 
