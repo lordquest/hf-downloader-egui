@@ -31,13 +31,21 @@ fn main() {
 
     // Windows builds embed assets/icon.ico so Explorer / taskbar show the app icon.
     // The runtime window icon is set separately in main.rs via egui::IconData.
-    if std::env::var("CARGO_CFG_WINDOWS").is_ok() {
-        let mut res = winresource::WindowsResource::new();
-        res.set_icon("assets/icon.ico");
-        res.compile().expect("failed to compile Windows resources");
-        println!("cargo:rerun-if-changed=assets/icon.ico");
-    }
+    // NOTE: must be cfg-gated, not a runtime check — on other platforms the
+    // winresource crate isn't in the dependency graph at all.
+    embed_windows_icon();
 }
+
+#[cfg(windows)]
+fn embed_windows_icon() {
+    let mut res = winresource::WindowsResource::new();
+    res.set_icon("assets/icon.ico");
+    res.compile().expect("failed to compile Windows resources");
+    println!("cargo:rerun-if-changed=assets/icon.ico");
+}
+
+#[cfg(not(windows))]
+fn embed_windows_icon() {}
 
 /// Copy files with any of `exts` from `src` to `dest`. No-op if `src` is missing.
 fn copy_assets(src: &PathBuf, dest: &PathBuf, exts: &[&str]) {
