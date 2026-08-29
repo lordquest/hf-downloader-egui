@@ -28,7 +28,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: target/x86_64-pc-windows-msvc/release/hf-downloader-egui.exe
-          generate_release_notes: true
+          # Intentionally off: GitHub's auto-generated notes only list merged pull
+          # requests, and this project pushes commits straight to `main`, so they came
+          # out empty. The `release-notes` job below writes notes from the commits.
+          generate_release_notes: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -62,7 +65,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: hf-downloader-egui-linux.tar.gz
-          generate_release_notes: true
+          # Intentionally off: GitHub's auto-generated notes only list merged pull
+          # requests, and this project pushes commits straight to `main`, so they came
+          # out empty. The `release-notes` job below writes notes from the commits.
+          generate_release_notes: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -109,6 +115,52 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: hf-downloader-egui-macos.tar.gz
-          generate_release_notes: true
+          # Intentionally off: GitHub's auto-generated notes only list merged pull
+          # requests, and this project pushes commits straight to `main`, so they came
+          # out empty. The `release-notes` job below writes notes from the commits.
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  release-notes:
+    name: Write release notes from commits
+    # Runs after the platform builds so the release (created by whichever upload lands
+    # first) already exists, letting a single job own the body instead of three racing.
+    needs: [build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # Full history: the default shallow clone can't resolve the previous tag.
+      - name: Checkout with full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build changelog from commit messages
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          # Most recent tag reachable before this one; empty on the very first release.
+          PREV=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)
+          {
+            echo "## What's Changed"
+            echo
+            if [ -n "$PREV" ]; then
+              git log --no-merges --pretty=format:'- %s (%h)' "${PREV}..${TAG}"
+            else
+              git log --no-merges --pretty=format:'- %s (%h)' "${TAG}"
+            fi
+            echo
+            echo
+            if [ -n "$PREV" ]; then
+              echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREV}...${TAG}"
+            fi
+          } > RELEASE_NOTES.md
+          cat RELEASE_NOTES.md
+
+      - name: Update release body
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: RELEASE_NOTES.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
