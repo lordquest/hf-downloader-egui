@@ -24,10 +24,19 @@ jobs:
       - name: Build release
         run: cargo build --release --target x86_64-pc-windows-msvc
 
+      # Rename the binary so the release asset carries a platform/arch tag,
+      # matching the modelscope-downloader-egui naming convention.
+      - name: Stage release asset
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/x86_64-pc-windows-msvc/release/hf-downloader-egui.exe \
+            dist/hf-downloader-egui-windows-x86_64.exe
+
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
         with:
-          files: target/x86_64-pc-windows-msvc/release/hf-downloader-egui.exe
+          files: dist/hf-downloader-egui-windows-x86_64.exe
           # Intentionally off: GitHub's auto-generated notes only list merged pull
           # requests, and this project pushes commits straight to `main`, so they came
           # out empty. The `release-notes` job below writes notes from the commits.
@@ -58,13 +67,13 @@ jobs:
 
       - name: Package release tarball
         run: |
-          tar -czf hf-downloader-egui-linux.tar.gz -C target/release \
+          tar -czf hf-downloader-egui-linux-x86_64.tar.gz -C target/release \
             hf-downloader-egui lang fonts
 
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
         with:
-          files: hf-downloader-egui-linux.tar.gz
+          files: hf-downloader-egui-linux-x86_64.tar.gz
           # Intentionally off: GitHub's auto-generated notes only list merged pull
           # requests, and this project pushes commits straight to `main`, so they came
           # out empty. The `release-notes` job below writes notes from the commits.
@@ -109,12 +118,12 @@ jobs:
           cp hf-downloader-egui pkg/
           cp -R target/aarch64-apple-darwin/release/lang pkg/
           cp -R target/aarch64-apple-darwin/release/fonts pkg/
-          tar -czf hf-downloader-egui-macos.tar.gz -C pkg .
+          tar -czf hf-downloader-egui-macos-universal.tar.gz -C pkg .
 
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
         with:
-          files: hf-downloader-egui-macos.tar.gz
+          files: hf-downloader-egui-macos-universal.tar.gz
           # Intentionally off: GitHub's auto-generated notes only list merged pull
           # requests, and this project pushes commits straight to `main`, so they came
           # out empty. The `release-notes` job below writes notes from the commits.

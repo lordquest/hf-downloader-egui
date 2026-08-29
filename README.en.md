@@ -6,7 +6,7 @@
 [![Downloads](https://img.shields.io/github/downloads/lordquest/hf-downloader-egui/total)](https://github.com/lordquest/hf-downloader-egui/releases)
 [![License: MIT](https://img.shields.io/github/license/lordquest/hf-downloader-egui)](LICENSE)
 
-**Download:** [hf-downloader-egui.exe (Windows, ~4.8 MB)](https://github.com/lordquest/hf-downloader-egui/releases/latest/download/hf-downloader-egui.exe)
+**Download:** [hf-downloader-egui-windows-x86_64.exe (Windows, ~5.6 MB)](https://github.com/lordquest/hf-downloader-egui/releases/latest/download/hf-downloader-egui-windows-x86_64.exe) · [Linux (x86_64, tar.gz)](https://github.com/lordquest/hf-downloader-egui/releases/latest/download/hf-downloader-egui-linux-x86_64.tar.gz) · [macOS (universal, tar.gz)](https://github.com/lordquest/hf-downloader-egui/releases/latest/download/hf-downloader-egui-macos-universal.tar.gz)
 
 A native desktop tool for downloading files from [Hugging Face](https://huggingface.co) model / dataset repositories — no Git, no Git LFS, and no runtime dependencies required.
 
