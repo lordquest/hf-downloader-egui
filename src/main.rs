@@ -437,6 +437,31 @@ impl App {
             None
         }
     }
+
+    /// Aggregate progress across every file of the current download, as the
+    /// progress-bar fraction plus its label. `None` when there is no download to
+    /// report on (nothing started yet, or the sizes are all unknown).
+    fn total_progress(&self) -> Option<(f32, String)> {
+        if self.file_states.is_empty() {
+            return None;
+        }
+        let (downloaded, total) = self
+            .file_states
+            .values()
+            .fold((0u64, 0u64), |(d, t), f| (d + f.downloaded, t + f.total));
+        if total == 0 {
+            return None;
+        }
+        let frac = (downloaded as f32 / total as f32).clamp(0.0, 1.0);
+        let text = format!(
+            "{}: {} / {}  ({:.1}%)",
+            self.t("total_progress"),
+            fmt_size(downloaded),
+            fmt_size(total),
+            frac * 100.0
+        );
+        Some((frac, text))
+    }
 }
 
 impl eframe::App for App {
@@ -581,6 +606,17 @@ impl eframe::App for App {
                 if let Some(summary) = self.download_summary() {
                     ui.add_space(12.0);
                     ui.label(egui::RichText::new(summary).weak());
+                }
+                // Overall progress across every file of the download, right after the
+                // speed readout. Uses whatever horizontal space is left in this row.
+                if let Some((frac, text)) = self.total_progress() {
+                    ui.add_space(12.0);
+                    let w = ui.available_width().clamp(140.0, 320.0);
+                    ui.add(
+                        egui::ProgressBar::new(frac)
+                            .text(text)
+                            .desired_width(w),
+                    );
                 }
             });
 
