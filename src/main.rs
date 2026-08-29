@@ -339,11 +339,26 @@ impl App {
                 }
                 UiMsg::Done { task_id } => {
                     if self.active_task_id.as_deref() == Some(&task_id) {
-                        // Whole task finished — nothing left to resume, so drop the
-                        // session file.
-                        session::delete_current_session();
-                        self.current_session = None;
-                        self.status = StatusMsg::Tr("done");
+                        // The engine reports "settled" (no live worker left), which is
+                        // not the same as "succeeded": failed or paused files have no
+                        // worker either. Only treat it as finished — and drop the
+                        // session — when every file actually completed; otherwise say
+                        // how many didn't and keep the session so they can be resumed.
+                        let unfinished = self
+                            .file_states
+                            .values()
+                            .filter(|f| {
+                                matches!(f.status, FileStatus::Failed | FileStatus::Cancelled)
+                            })
+                            .count();
+                        if unfinished > 0 {
+                            self.status =
+                                StatusMsg::TrCount("settled_unfinished", unfinished, "files");
+                        } else {
+                            session::delete_current_session();
+                            self.current_session = None;
+                            self.status = StatusMsg::Tr("done");
+                        }
                     }
                 }
                 UiMsg::RepoListed { info, entries } => {

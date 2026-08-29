@@ -67,6 +67,9 @@ pub struct FileState {
     pub error: Option<String>,
 }
 
+/// Maximum number of files downloaded at once, across the whole task.
+const MAX_CONCURRENT_DOWNLOADS: usize = 3;
+
 pub struct DownloadTask {
     pub repo_id: String,
     pub repo_type: String,
@@ -75,6 +78,10 @@ pub struct DownloadTask {
     pub endpoint: String,
     pub files: HashMap<String, FileState>,
     pub cancelled: Arc<AtomicBool>,
+    /// Concurrency cap shared by every worker of this task. It must live on the task
+    /// rather than in `start_downloads`, otherwise each call (including every `retry`)
+    /// would mint its own permits and the cap would never actually bind.
+    pub sem: Arc<Semaphore>,
 }
 
 impl DownloadTask {
@@ -93,13 +100,21 @@ impl DownloadTask {
             endpoint,
             files: HashMap::new(),
             cancelled: Arc::new(AtomicBool::new(false)),
+            sem: Arc::new(Semaphore::new(MAX_CONCURRENT_DOWNLOADS)),
         }
     }
 
-    pub fn is_done(&self) -> bool {
+    /// True while at least one file still has a live worker (queued behind the
+    /// semaphore or in flight).
+    ///
+    /// "Settled" (no live worker) is deliberately NOT the same as "completed": a file
+    /// that failed or was paused has no worker left, yet the task is still incomplete
+    /// and must stay resumable. The UI distinguishes the two — see the `UiMsg::Done`
+    /// handler in `main.rs`.
+    pub fn any_active(&self) -> bool {
         self.files
             .values()
-            .all(|f| !matches!(f.status, FileStatus::Pending | FileStatus::Downloading))
+            .any(|f| matches!(f.status, FileStatus::Pending | FileStatus::Downloading))
     }
 }
 
@@ -161,7 +176,12 @@ pub async fn start_downloads(
     tx: Sender<UiMsg>,
     lang: String,
 ) {
-    let sem = Arc::new(Semaphore::new(3)); // max 3 concurrent downloads
+    // Per-task semaphore (see `DownloadTask::sem`) so the cap covers every worker of
+    // the task, including ones spawned by `retry`.
+    let sem = {
+        let t = task.lock().await;
+        t.sem.clone()
+    };
 
     let mut started_any = false;
     // True while at least one file still has a live worker (queued behind the
@@ -171,14 +191,14 @@ pub async fn start_downloads(
     // while it is still running.
     let mut any_active = false;
     for (path, size) in file_paths {
-        // Decide whether this file still needs downloading. Already-"done" files are
-        // re-verified against disk, because a file can be deleted/truncated after a
-        // prior successful run while the in-memory task still reports Done. Files that
-        // are Downloading/Pending already have a live worker, so they must not be
-        // spawned a second time.
+        // Decide whether to spawn a worker AND claim the file, all inside ONE critical
+        // section. Checking first and inserting later let two concurrent
+        // `start_downloads` calls (e.g. a rapid double-click on "Start Download", or a
+        // `retry` racing the main loop) both decide "not claimed yet" and spawn two
+        // workers for the same path — one truncating the file while the other appends.
         let (needs_download, has_worker) = {
-            let t = task.lock().await;
-            match t.files.get(&path) {
+            let mut t = task.lock().await;
+            let decision = match t.files.get(&path) {
                 Some(existing) => match existing.status {
                     FileStatus::Failed | FileStatus::Cancelled => (true, false),
                     FileStatus::Done | FileStatus::Exists => {
@@ -194,25 +214,25 @@ pub async fn start_downloads(
                     FileStatus::Downloading | FileStatus::Pending => (false, true),
                 },
                 None => (true, false),
+            };
+            if decision.0 {
+                t.files.insert(
+                    path.clone(),
+                    FileState {
+                        path: path.clone(),
+                        status: FileStatus::Pending,
+                        downloaded: 0,
+                        total: size,
+                        speed: 0.0,
+                        error: None,
+                    },
+                );
             }
+            decision
         };
         any_active |= has_worker;
 
-        if needs_download {
-            let mut t = task.lock().await;
-            t.files.insert(
-                path.clone(),
-                FileState {
-                    path: path.clone(),
-                    status: FileStatus::Pending,
-                    downloaded: 0,
-                    total: size,
-                    speed: 0.0,
-                    error: None,
-                },
-            );
-            drop(t);
-        } else {
+        if !needs_download {
             // Already complete on disk (or a live worker is handling it): report the
             // real status so the UI doesn't keep the misleading 0% / "starting…".
             send_file(&tx, &task, &path).await;
@@ -289,6 +309,21 @@ async fn download_file(
         }
     }
     send_file(&tx, &task, file_path).await;
+
+    // The path comes from the server's file listing, so it must be treated as untrusted
+    // input: `Path::join` with an absolute path replaces the base directory entirely
+    // (on Windows even a bare `C:` does), and `..` segments walk out of the download
+    // directory. Refuse to write anything but a plain relative path.
+    if !is_safe_relative_path(file_path) {
+        fail(
+            &task,
+            &tx,
+            file_path,
+            format!("{}: {}", i18n::t("err_unsafe_path", &lang), file_path),
+        )
+        .await;
+        return;
+    }
 
     // Build local path
     let local_path = Path::new(&target_dir).join(file_path);
@@ -399,6 +434,21 @@ async fn download_file(
         };
 
         let status = resp.status();
+
+        // 416 Range Not Satisfiable: the local file is already larger than (or past the
+        // end of) the remote one, so every further Range request fails the same way and
+        // "Resume" would be permanently broken. Discard the stale bytes and restart from
+        // offset 0 — after this `existing_size` is 0, so no Range header is sent.
+        if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+            let _ = fs::remove_file(&local_path).await;
+            if attempt < MAX_ATTEMPTS && !cancelled.load(Ordering::Relaxed) {
+                attempt += 1;
+                continue 'download;
+            }
+            fail(&task, &tx, file_path, format!("HTTP {}", status)).await;
+            return;
+        }
+
         if !status.is_success() && status != reqwest::StatusCode::PARTIAL_CONTENT {
             // Retry on transient server errors / rate limits; give up on auth/not-found.
             let retryable = status == reqwest::StatusCode::REQUEST_TIMEOUT
@@ -417,11 +467,18 @@ async fn download_file(
         // NOTE: hf-mirror's resolve-cache returns `Content-Length: None`. Fall back to the
         // size we already know from the file list, so the UI shows a real total and we can
         // detect completion even when the stream never sends EOF (proxy keeps connection open).
+        //
+        // The `206` case must NOT fall back to `existing_size`: a `206` with no
+        // `Content-Length` would make `downloaded >= file_total` true from the very first
+        // chunk, so the safety-net below would stop the stream immediately and report the
+        // file as complete — silently truncating it to one chunk per attempt.
         let content_length = resp.content_length().unwrap_or(0);
-        file_total = if status == reqwest::StatusCode::PARTIAL_CONTENT {
-            existing_size + content_length
-        } else if content_length > 0 {
-            content_length
+        file_total = if content_length > 0 {
+            if status == reqwest::StatusCode::PARTIAL_CONTENT {
+                existing_size + content_length
+            } else {
+                content_length
+            }
         } else {
             known_total
         };
@@ -506,12 +563,14 @@ async fn download_file(
             if bytes.is_empty() {
                 // Some proxies keep the connection open and emit empty frames after the body
                 // is done. If we've made no real progress for `read_timeout`, treat it as a
-                // stall instead of spinning forever.
+                // stall instead of spinning forever. Yield first: without a sleep this
+                // branch busy-loops and pins a CPU core for up to `read_timeout`.
                 if last_progress.elapsed() > read_timeout {
                     fatal_msg = i18n::t("err_timeout", &lang);
                     fatal = true;
                     break 'stream;
                 }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 continue;
             }
             if let Err(e) = file.write_all(&bytes).await {
@@ -597,12 +656,15 @@ async fn download_file(
         break 'download;
     }
 
-    // Check if all done
-    let all_done = {
+    // Report only once the task has settled, i.e. no file still has a live worker.
+    // Whether it *succeeded* is for the UI to decide: failed/paused files have no
+    // worker either, and reporting "complete" for those would both mislead the user
+    // and delete the session they still need in order to resume them.
+    let settled = {
         let t = task.lock().await;
-        t.is_done()
+        !t.any_active()
     };
-    if all_done {
+    if settled {
         let _ = tx.send(UiMsg::Done {
             task_id: task_id.to_string(),
         });
@@ -611,6 +673,31 @@ async fn download_file(
 
 fn send_progress(tx: &Sender<UiMsg>, file: FileState) {
     let _ = tx.send(UiMsg::File(file));
+}
+
+/// Accept only a plain repo-relative path, i.e. one that provably stays inside the
+/// download directory. Rejects empty paths, absolute paths (POSIX `/`, Windows `\`,
+/// UNC, and drive letters like `C:`), NUL bytes, and any `..` segment — all of which
+/// would let a hostile or corrupted file listing write outside the target directory.
+fn is_safe_relative_path(path: &str) -> bool {
+    if path.is_empty() || path.contains('\0') {
+        return false;
+    }
+    if path.starts_with('/') || path.starts_with('\\') {
+        return false;
+    }
+    // Drive letter ("C:...") — must be checked before segment splitting, since `Path`
+    // semantics on Windows treat it as absolute.
+    if path.chars().nth(1) == Some(':') {
+        return false;
+    }
+    if let Some(rest) = path.strip_prefix("\\\\") {
+        // UNC-ish prefix; also reject a leading double separator.
+        if !rest.is_empty() {
+            return false;
+        }
+    }
+    !path.split(['/', '\\']).any(|seg| seg == "..")
 }
 
 /// Lock the shared task, clone the requested file's state, release the lock, then emit.
@@ -989,6 +1076,26 @@ mod tests {
         assert_eq!(ep, new_endpoint, "retry must apply the new endpoint");
         assert_eq!(std::fs::read(&out).unwrap(), *blob);
         let _ = std::fs::remove_file(&out);
+    }
+
+    /// Paths come from the server and are joined onto the download directory, so
+    /// anything that could escape it must be rejected.
+    #[test]
+    fn unsafe_paths_are_rejected() {
+        for bad in [
+            "../etc/passwd",
+            "a/../../b",
+            "/abs/path",
+            "C:/windows/system32",
+            "\\\\server\\share\\x",
+            "",
+            "a/\0b",
+        ] {
+            assert!(!is_safe_relative_path(bad), "should be rejected: {:?}", bad);
+        }
+        for good in ["model.safetensors", "sub/dir/config.json", ".gitattributes"] {
+            assert!(is_safe_relative_path(good), "should be accepted: {:?}", good);
+        }
     }
 
     /// Regression: pressing "Start Download" while a task is already running must not

@@ -109,6 +109,11 @@ impl DownloadEngine {
             let tasks = self.manager.tasks.lock().await;
             if let Some(task) = tasks.get(task_id) {
                 let mut t = task.lock().await;
+                // Also raise the task-level flag: a worker sitting in `backoff()` (up to
+                // 10s) or between retry attempts only observes cancellation through this
+                // flag, so without it the pause would be silently undone when it wakes.
+                t.cancelled
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 for f in t.files.values_mut() {
                     if f.status == FileStatus::Downloading || f.status == FileStatus::Pending {
                         f.status = FileStatus::Cancelled;

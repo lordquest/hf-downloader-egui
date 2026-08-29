@@ -147,10 +147,16 @@ pub async fn list_files(
         format!("{}&path={}", url, subpath)
     };
 
-    let client = reqwest::Client::new();
+    // Explicit timeouts: with the defaults a hanging server would leave the UI stuck on
+    // "Fetching file list..." forever with no way to tell what went wrong.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_default();
     let mut req = client
         .get(&url)
-        .header("User-Agent", "hf-downloader-egui/0.1");
+        .header("User-Agent", "hf-downloader-egui/0.1")
+        .timeout(std::time::Duration::from_secs(120));
 
     // Attach token if available
     if let Some(token) = read_token() {

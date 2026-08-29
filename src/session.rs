@@ -131,7 +131,19 @@ fn process_alive(pid: u32) -> bool {
     }
 }
 
+// POSIX (Linux/macOS): `kill -0 <pid>` reports whether the process exists without
+// actually sending a signal — exit status 0 means it is alive (and owned by us).
+// Returning a constant `false` here previously made EVERY session look recoverable,
+// including one a running instance was actively using, which let two processes append
+// to the same file and corrupt it.
 #[cfg(not(windows))]
-fn process_alive(_pid: u32) -> bool {
-    false
+fn process_alive(pid: u32) -> bool {
+    if pid == std::process::id() {
+        return true;
+    }
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
