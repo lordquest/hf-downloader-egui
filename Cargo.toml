@@ -21,6 +21,11 @@ sys-locale = "0.3"
 # Cross-platform system clipboard access for the right-click Paste menu.
 arboard = "3"
 
+[target.'cfg(windows)'.build-dependencies]
+# Embeds assets/icon.ico as a Win32 resource so the .exe shows the app icon in
+# Windows Explorer and on the taskbar (the runtime egui icon only covers the window).
+winresource = "0.1"
+
 [profile.release]
 opt-level = "z"
 lto = true

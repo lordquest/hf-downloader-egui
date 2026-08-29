@@ -1184,6 +1184,20 @@ fn set_ccursor(ctx: &egui::Context, id: egui::Id, s: usize, e: usize) {
     }
 }
 
+/// Raw 64x64 RGBA pixels for the app icon ("HF" on an amber tile), embedded at
+/// compile time so no image-decoding dependency or runtime file lookup is needed.
+const ICON_RGBA: &[u8] = include_bytes!("../assets/icon.rgba");
+const ICON_SIZE: u32 = 64;
+
+/// Without an explicit icon every eframe app shows the same default black "e".
+fn app_icon() -> egui::IconData {
+    egui::IconData {
+        rgba: ICON_RGBA.to_vec(),
+        width: ICON_SIZE,
+        height: ICON_SIZE,
+    }
+}
+
 fn main() -> eframe::Result<()> {
     i18n::load();
     let (tx, rx) = std::sync::mpsc::channel::<UiMsg>();
@@ -1191,7 +1205,8 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 720.0])
-            .with_min_inner_size([760.0, 520.0]),
+            .with_min_inner_size([760.0, 520.0])
+            .with_icon(std::sync::Arc::new(app_icon())),
         ..Default::default()
     };
     eframe::run_native(

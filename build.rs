@@ -28,6 +28,15 @@ fn main() {
 
     println!("cargo:rerun-if-changed=lang");
     println!("cargo:rerun-if-changed=fonts");
+
+    // Windows builds embed assets/icon.ico so Explorer / taskbar show the app icon.
+    // The runtime window icon is set separately in main.rs via egui::IconData.
+    if std::env::var("CARGO_CFG_WINDOWS").is_ok() {
+        let mut res = winresource::WindowsResource::new();
+        res.set_icon("assets/icon.ico");
+        res.compile().expect("failed to compile Windows resources");
+        println!("cargo:rerun-if-changed=assets/icon.ico");
+    }
 }
 
 /// Copy files with any of `exts` from `src` to `dest`. No-op if `src` is missing.
